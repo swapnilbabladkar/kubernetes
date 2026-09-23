@@ -19,15 +19,15 @@ package componentconfigs
 import (
 	"path/filepath"
 
-	"k8s.io/apimachinery/pkg/util/version"
 	clientset "k8s.io/client-go/kubernetes"
+	"k8s.io/klog/v2"
 	kubeletconfig "k8s.io/kubelet/config/v1beta1"
-	utilpointer "k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
-	kubeadmapiv1beta2 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta2"
+	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta4"
 	"k8s.io/kubernetes/cmd/kubeadm/app/constants"
-	"k8s.io/kubernetes/cmd/kubeadm/app/features"
+	"k8s.io/kubernetes/cmd/kubeadm/app/util/errors"
 )
 
 const (
@@ -49,6 +49,9 @@ const (
 
 	// kubeletHealthzBindAddress specifies the default healthz bind address
 	kubeletHealthzBindAddress = "127.0.0.1"
+
+	// kubeletSystemdResolverConfig specifies the default resolver config when systemd service is active
+	kubeletSystemdResolverConfig = "/run/systemd/resolve/resolv.conf"
 )
 
 // kubeletHandler is the handler instance for the kubelet component config
@@ -56,42 +59,56 @@ var kubeletHandler = handler{
 	GroupVersion: kubeletconfig.SchemeGroupVersion,
 	AddToScheme:  kubeletconfig.AddToScheme,
 	CreateEmpty: func() kubeadmapi.ComponentConfig {
-		return &kubeletConfig{}
+		return &kubeletConfig{
+			configBase: configBase{
+				GroupVersion: kubeletconfig.SchemeGroupVersion,
+			},
+		}
 	},
 	fromCluster: kubeletConfigFromCluster,
 }
 
-func kubeletConfigFromCluster(h *handler, clientset clientset.Interface, clusterCfg *kubeadmapi.ClusterConfiguration) (kubeadmapi.ComponentConfig, error) {
-	// Read the ConfigMap from the cluster based on what version the kubelet is
-	k8sVersion, err := version.ParseGeneric(clusterCfg.KubernetesVersion)
+func kubeletConfigFromCluster(h *handler, clientset clientset.Interface, _ *kubeadmapi.ClusterConfiguration) (kubeadmapi.ComponentConfig, error) {
+	configMapName := constants.KubeletBaseConfigurationConfigMap
+	klog.V(1).Infof("attempting to download the KubeletConfiguration from ConfigMap %q", configMapName)
+	cm, err := h.fromConfigMap(clientset, configMapName, constants.KubeletBaseConfigurationConfigMapKey, true)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrapf(err, "could not download the kubelet configuration from ConfigMap %q",
+			configMapName)
 	}
-
-	configMapName := constants.GetKubeletConfigMapName(k8sVersion)
-	return h.fromConfigMap(clientset, configMapName, constants.KubeletBaseConfigurationConfigMapKey, true)
+	return cm, nil
 }
 
 // kubeletConfig implements the kubeadmapi.ComponentConfig interface for kubelet
 type kubeletConfig struct {
+	configBase
 	config kubeletconfig.KubeletConfiguration
 }
 
 func (kc *kubeletConfig) DeepCopy() kubeadmapi.ComponentConfig {
 	result := &kubeletConfig{}
+	kc.configBase.DeepCopyInto(&result.configBase)
 	kc.config.DeepCopyInto(&result.config)
 	return result
 }
 
 func (kc *kubeletConfig) Marshal() ([]byte, error) {
-	return kubeletHandler.Marshal(&kc.config)
+	return kc.configBase.Marshal(&kc.config)
 }
 
 func (kc *kubeletConfig) Unmarshal(docmap kubeadmapi.DocumentMap) error {
-	return kubeletHandler.Unmarshal(docmap, &kc.config)
+	return kc.configBase.Unmarshal(docmap, &kc.config)
 }
 
-func (kc *kubeletConfig) Default(cfg *kubeadmapi.ClusterConfiguration, _ *kubeadmapi.APIEndpoint) {
+func (kc *kubeletConfig) Get() interface{} {
+	return &kc.config
+}
+
+func (kc *kubeletConfig) Set(cfg interface{}) {
+	kc.config = *cfg.(*kubeletconfig.KubeletConfiguration)
+}
+
+func (kc *kubeletConfig) Default(cfg *kubeadmapi.ClusterConfiguration, _ *kubeadmapi.APIEndpoint, nodeRegOpts *kubeadmapi.NodeRegistrationOptions) {
 	const kind = "KubeletConfiguration"
 
 	if kc.config.FeatureGates == nil {
@@ -99,15 +116,15 @@ func (kc *kubeletConfig) Default(cfg *kubeadmapi.ClusterConfiguration, _ *kubead
 	}
 
 	if kc.config.StaticPodPath == "" {
-		kc.config.StaticPodPath = kubeadmapiv1beta2.DefaultManifestsDir
-	} else if kc.config.StaticPodPath != kubeadmapiv1beta2.DefaultManifestsDir {
-		warnDefaultComponentConfigValue(kind, "staticPodPath", kubeadmapiv1beta2.DefaultManifestsDir, kc.config.StaticPodPath)
+		kc.config.StaticPodPath = kubeadmapiv1.DefaultManifestsDir
+	} else if kc.config.StaticPodPath != kubeadmapiv1.DefaultManifestsDir {
+		warnDefaultComponentConfigValue(kind, "staticPodPath", kubeadmapiv1.DefaultManifestsDir, kc.config.StaticPodPath)
 	}
 
 	clusterDNS := ""
-	dnsIP, err := constants.GetDNSIP(cfg.Networking.ServiceSubnet, features.Enabled(cfg.FeatureGates, features.IPv6DualStack))
+	dnsIP, err := constants.GetDNSIP(cfg.Networking.ServiceSubnet)
 	if err != nil {
-		clusterDNS = kubeadmapiv1beta2.DefaultClusterDNSIP
+		clusterDNS = kubeadmapiv1.DefaultClusterDNSIP
 	} else {
 		clusterDNS = dnsIP.String()
 	}
@@ -133,8 +150,8 @@ func (kc *kubeletConfig) Default(cfg *kubeadmapi.ClusterConfiguration, _ *kubead
 	}
 
 	if kc.config.Authentication.Anonymous.Enabled == nil {
-		kc.config.Authentication.Anonymous.Enabled = utilpointer.BoolPtr(kubeletAuthenticationAnonymousEnabled)
-	} else if *kc.config.Authentication.Anonymous.Enabled != kubeletAuthenticationAnonymousEnabled {
+		kc.config.Authentication.Anonymous.Enabled = ptr.To(kubeletAuthenticationAnonymousEnabled)
+	} else if *kc.config.Authentication.Anonymous.Enabled {
 		warnDefaultComponentConfigValue(kind, "authentication.anonymous.enabled", kubeletAuthenticationAnonymousEnabled, *kc.config.Authentication.Anonymous.Enabled)
 	}
 
@@ -148,12 +165,12 @@ func (kc *kubeletConfig) Default(cfg *kubeadmapi.ClusterConfiguration, _ *kubead
 
 	// Let clients using other authentication methods like ServiceAccount tokens also access the kubelet API
 	if kc.config.Authentication.Webhook.Enabled == nil {
-		kc.config.Authentication.Webhook.Enabled = utilpointer.BoolPtr(kubeletAuthenticationWebhookEnabled)
-	} else if *kc.config.Authentication.Webhook.Enabled != kubeletAuthenticationWebhookEnabled {
+		kc.config.Authentication.Webhook.Enabled = ptr.To(kubeletAuthenticationWebhookEnabled)
+	} else if !*kc.config.Authentication.Webhook.Enabled {
 		warnDefaultComponentConfigValue(kind, "authentication.webhook.enabled", kubeletAuthenticationWebhookEnabled, *kc.config.Authentication.Webhook.Enabled)
 	}
 
-	// Serve a /healthz webserver on localhost:10248 that kubeadm can talk to
+	// Serve a /healthz webserver on 127.0.0.1:10248 that kubeadm can talk to
 	if kc.config.HealthzBindAddress == "" {
 		kc.config.HealthzBindAddress = kubeletHealthzBindAddress
 	} else if kc.config.HealthzBindAddress != kubeletHealthzBindAddress {
@@ -161,7 +178,7 @@ func (kc *kubeletConfig) Default(cfg *kubeadmapi.ClusterConfiguration, _ *kubead
 	}
 
 	if kc.config.HealthzPort == nil {
-		kc.config.HealthzPort = utilpointer.Int32Ptr(constants.KubeletHealthzPort)
+		kc.config.HealthzPort = ptr.To[int32](constants.KubeletHealthzPort)
 	} else if *kc.config.HealthzPort != constants.KubeletHealthzPort {
 		warnDefaultComponentConfigValue(kind, "healthzPort", constants.KubeletHealthzPort, *kc.config.HealthzPort)
 	}
@@ -173,4 +190,9 @@ func (kc *kubeletConfig) Default(cfg *kubeadmapi.ClusterConfiguration, _ *kubead
 	// We cannot show a warning for RotateCertificates==false and we must hardcode it to true.
 	// There is no way to determine if the user has set this or not, given the field is a non-pointer.
 	kc.config.RotateCertificates = kubeletRotateCertificates
+
+	if len(kc.config.CgroupDriver) == 0 {
+		klog.V(1).Infof("the value of KubeletConfiguration.cgroupDriver is empty; setting it to %q", constants.CgroupDriverSystemd)
+		kc.config.CgroupDriver = constants.CgroupDriverSystemd
+	}
 }

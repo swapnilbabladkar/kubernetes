@@ -17,10 +17,11 @@ limitations under the License.
 package service
 
 import (
+	"context"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientset "k8s.io/client-go/kubernetes"
 	restclient "k8s.io/client-go/rest"
@@ -60,20 +61,20 @@ func CreateServiceSpec(serviceName, externalName string, isHeadless bool, select
 // UpdateService fetches a service, calls the update function on it,
 // and then attempts to send the updated service. It retries up to 2
 // times in the face of timeouts and conflicts.
-func UpdateService(c clientset.Interface, namespace, serviceName string, update func(*v1.Service)) (*v1.Service, error) {
+func UpdateService(ctx context.Context, c clientset.Interface, namespace, serviceName string, update func(*v1.Service)) (*v1.Service, error) {
 	var service *v1.Service
 	var err error
-	for i := 0; i < 3; i++ {
-		service, err = c.CoreV1().Services(namespace).Get(serviceName, metav1.GetOptions{})
+	for range 3 {
+		service, err = c.CoreV1().Services(namespace).Get(ctx, serviceName, metav1.GetOptions{})
 		if err != nil {
 			return service, err
 		}
 
 		update(service)
 
-		service, err = c.CoreV1().Services(namespace).Update(service)
+		service, err = c.CoreV1().Services(namespace).Update(ctx, service, metav1.UpdateOptions{})
 
-		if !errors.IsConflict(err) && !errors.IsServerTimeout(err) {
+		if !apierrors.IsConflict(err) && !apierrors.IsServerTimeout(err) {
 			return service, err
 		}
 	}
@@ -81,8 +82,8 @@ func UpdateService(c clientset.Interface, namespace, serviceName string, update 
 }
 
 // CleanupServiceResources cleans up service Type=LoadBalancer resources.
-func CleanupServiceResources(c clientset.Interface, loadBalancerName, region, zone string) {
-	framework.TestContext.CloudConfig.Provider.CleanupServiceResources(c, loadBalancerName, region, zone)
+func CleanupServiceResources(ctx context.Context, c clientset.Interface, loadBalancerName, region, zone string) {
+	framework.TestContext.CloudConfig.Provider.CleanupServiceResources(ctx, c, loadBalancerName, region, zone)
 }
 
 // GetIngressPoint returns a host on which ingress serves.
@@ -94,18 +95,22 @@ func GetIngressPoint(ing *v1.LoadBalancerIngress) string {
 	return host
 }
 
-// EnableAndDisableInternalLB returns two functions for enabling and disabling the internal load balancer
-// setting for the supported cloud providers (currently GCE/GKE and Azure) and empty functions for others.
-func EnableAndDisableInternalLB() (enable func(svc *v1.Service), disable func(svc *v1.Service)) {
-	return framework.TestContext.CloudConfig.Provider.EnableAndDisableInternalLB()
-}
-
 // GetServiceLoadBalancerCreationTimeout returns a timeout value for creating a load balancer of a service.
-func GetServiceLoadBalancerCreationTimeout(cs clientset.Interface) time.Duration {
-	nodes, err := e2enode.GetReadySchedulableNodes(cs)
+func GetServiceLoadBalancerCreationTimeout(ctx context.Context, cs clientset.Interface) time.Duration {
+	nodes, err := e2enode.GetReadySchedulableNodes(ctx, cs)
 	framework.ExpectNoError(err)
 	if len(nodes.Items) > LargeClusterMinNodesNumber {
-		return LoadBalancerCreateTimeoutLarge
+		return loadBalancerCreateTimeoutLarge
 	}
-	return LoadBalancerCreateTimeoutDefault
+	return loadBalancerCreateTimeoutDefault
+}
+
+// GetServiceLoadBalancerPropagationTimeout returns a timeout value for propagating a load balancer of a service.
+func GetServiceLoadBalancerPropagationTimeout(ctx context.Context, cs clientset.Interface) time.Duration {
+	nodes, err := e2enode.GetReadySchedulableNodes(ctx, cs)
+	framework.ExpectNoError(err)
+	if len(nodes.Items) > LargeClusterMinNodesNumber {
+		return loadBalancerPropagationTimeoutLarge
+	}
+	return loadBalancerPropagationTimeoutDefault
 }

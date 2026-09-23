@@ -1,4 +1,4 @@
-// +build linux
+//go:build linux
 
 /*
 Copyright 2015 The Kubernetes Authors.
@@ -19,14 +19,15 @@ limitations under the License.
 package e2enode
 
 import (
+	"context"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"path"
 	"sort"
 	"strconv"
 	"time"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2emetrics "k8s.io/kubernetes/test/e2e/framework/metrics"
@@ -49,7 +50,7 @@ func dumpDataToFile(data interface{}, labels map[string]string, prefix string) {
 	fileName := path.Join(framework.TestContext.ReportDir, fmt.Sprintf("%s-%s-%s.json", prefix, framework.TestContext.ReportPrefix, testName))
 	labels["timestamp"] = strconv.FormatInt(time.Now().UTC().Unix(), 10)
 	framework.Logf("Dumping perf data for test %q to %q.", testName, fileName)
-	if err := ioutil.WriteFile(fileName, []byte(framework.PrettyPrintJSON(data)), 0644); err != nil {
+	if err := os.WriteFile(fileName, []byte(framework.PrettyPrintJSON(data)), 0644); err != nil {
 		framework.Logf("Failed to write perf data for test %q to %q: %v", testName, fileName, err)
 	}
 }
@@ -156,7 +157,7 @@ func getThroughputPerfData(batchLag time.Duration, e2eLags []e2emetrics.PodLaten
 // name of the node, and the node capacities.
 func getTestNodeInfo(f *framework.Framework, testName, testDesc string) map[string]string {
 	nodeName := framework.TestContext.NodeName
-	node, err := f.ClientSet.CoreV1().Nodes().Get(nodeName, metav1.GetOptions{})
+	node, err := f.ClientSet.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
 	framework.ExpectNoError(err)
 
 	cpu, ok := node.Status.Capacity[v1.ResourceCPU]

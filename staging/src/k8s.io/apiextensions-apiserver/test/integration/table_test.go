@@ -17,6 +17,7 @@ limitations under the License.
 package integration
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -31,42 +32,42 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 
-	apiextensionsv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	"k8s.io/apiextensions-apiserver/test/integration/fixtures"
 )
 
-func newTableCRD() *apiextensionsv1beta1.CustomResourceDefinition {
-	return &apiextensionsv1beta1.CustomResourceDefinition{
+func newTableCRD() *apiextensionsv1.CustomResourceDefinition {
+	return &apiextensionsv1.CustomResourceDefinition{
 		ObjectMeta: metav1.ObjectMeta{Name: "tables.mygroup.example.com"},
-		Spec: apiextensionsv1beta1.CustomResourceDefinitionSpec{
-			Group:   "mygroup.example.com",
-			Version: "v1beta1",
-			Names: apiextensionsv1beta1.CustomResourceDefinitionNames{
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "mygroup.example.com",
+			Names: apiextensionsv1.CustomResourceDefinitionNames{
 				Plural:   "tables",
 				Singular: "table",
 				Kind:     "Table",
 				ListKind: "TablemList",
 			},
-			Scope: apiextensionsv1beta1.ClusterScoped,
-			Versions: []apiextensionsv1beta1.CustomResourceDefinitionVersion{
+			Scope: apiextensionsv1.ClusterScoped,
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
 				{
 					Name:    "v1beta1",
 					Served:  true,
 					Storage: false,
-					AdditionalPrinterColumns: []apiextensionsv1beta1.CustomResourceColumnDefinition{
+					AdditionalPrinterColumns: []apiextensionsv1.CustomResourceColumnDefinition{
 						{Name: "Age", Type: "date", JSONPath: ".metadata.creationTimestamp"},
 						{Name: "Alpha", Type: "string", JSONPath: ".spec.alpha"},
 						{Name: "Beta", Type: "integer", Description: "the beta field", Format: "int64", Priority: 42, JSONPath: ".spec.beta"},
 						{Name: "Gamma", Type: "integer", Description: "a column with wrongly typed values", JSONPath: ".spec.gamma"},
 						{Name: "Epsilon", Type: "string", Description: "an array of integers as string", JSONPath: ".spec.epsilon"},
 					},
+					Schema: fixtures.AllowAllSchema(),
 				},
 				{
 					Name:    "v1",
 					Served:  true,
 					Storage: true,
-					AdditionalPrinterColumns: []apiextensionsv1beta1.CustomResourceColumnDefinition{
+					AdditionalPrinterColumns: []apiextensionsv1.CustomResourceColumnDefinition{
 						{Name: "Age", Type: "date", JSONPath: ".metadata.creationTimestamp"},
 						{Name: "Alpha", Type: "string", JSONPath: ".spec.alpha"},
 						{Name: "Beta", Type: "integer", Description: "the beta field", Format: "int64", Priority: 42, JSONPath: ".spec.beta"},
@@ -74,6 +75,7 @@ func newTableCRD() *apiextensionsv1beta1.CustomResourceDefinition {
 						{Name: "Epsilon", Type: "string", Description: "an array of integers as string", JSONPath: ".spec.epsilon"},
 						{Name: "Zeta", Type: "integer", Description: "the zeta field", Format: "int64", Priority: 42, JSONPath: ".spec.zeta"},
 					},
+					Schema: fixtures.AllowAllSchema(),
 				},
 			},
 		},
@@ -118,19 +120,19 @@ func TestTableGet(t *testing.T) {
 	}
 
 	crd := newTableCRD()
-	crd, err = fixtures.CreateNewCustomResourceDefinition(crd, apiExtensionClient, dynamicClient)
+	crd, err = fixtures.CreateNewV1CustomResourceDefinition(crd, apiExtensionClient, dynamicClient)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	crd, err = apiExtensionClient.ApiextensionsV1beta1().CustomResourceDefinitions().Get(crd.Name, metav1.GetOptions{})
+	crd, err = apiExtensionClient.ApiextensionsV1().CustomResourceDefinitions().Get(context.TODO(), crd.Name, metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("table crd created: %#v", crd)
 
 	crClient := newNamespacedCustomResourceVersionedClient("", dynamicClient, crd, "v1")
-	foo, err := crClient.Create(newTableInstance("foo"), metav1.CreateOptions{})
+	foo, err := crClient.Create(context.TODO(), newTableInstance("foo"), metav1.CreateOptions{})
 	if err != nil {
 		t.Fatalf("unable to create noxu instance: %v", err)
 	}
@@ -164,7 +166,7 @@ func TestTableGet(t *testing.T) {
 				Resource(crd.Spec.Names.Plural).
 				SetHeader("Accept", fmt.Sprintf("application/json;as=Table;v=%s;g=%s, application/json", metav1beta1.SchemeGroupVersion.Version, metav1beta1.GroupName)).
 				VersionedParams(&metav1beta1.TableOptions{}, parameterCodec).
-				Do().
+				Do(context.TODO()).
 				Get()
 			if err != nil {
 				t.Fatalf("failed to list %v resources: %v", gvk, err)
@@ -244,13 +246,13 @@ func TestTableGet(t *testing.T) {
 				if got, expected := tbl.Rows[0].Cells[4], interface{}(nil); got != expected {
 					t.Errorf("expected cell[4] to equal %#v although the type does not match the column, got %#v", expected, got)
 				}
-				if got, expected := tbl.Rows[0].Cells[5], "[1 2 3]"; got != expected {
+				if got, expected := tbl.Rows[0].Cells[5], "[1,2,3]"; got != expected {
 					t.Errorf("expected cell[5] to equal %q, got %q", expected, got)
 				}
 				// Validate extra column for v1
 				if i == 1 {
 					if got, expected := tbl.Rows[0].Cells[6], int64(5); got != expected {
-						t.Errorf("expected cell[6] to equal %q, got %q", expected, got)
+						t.Errorf("expected cell[6] to equal %v, got %v", expected, got)
 					}
 				}
 			}
@@ -262,7 +264,7 @@ func TestTableGet(t *testing.T) {
 				Resource(crd.Spec.Names.Plural).
 				SetHeader("Accept", fmt.Sprintf("application/json;as=Table;v=%s;g=%s, application/json", metav1.SchemeGroupVersion.Version, metav1.GroupName)).
 				VersionedParams(&metav1.TableOptions{}, parameterCodec).
-				Do().
+				Do(context.TODO()).
 				Get()
 			if err != nil {
 				t.Fatalf("failed to list %v resources: %v", gvk, err)
@@ -342,13 +344,13 @@ func TestTableGet(t *testing.T) {
 				if got, expected := tbl.Rows[0].Cells[4], interface{}(nil); got != expected {
 					t.Errorf("expected cell[4] to equal %#v although the type does not match the column, got %#v", expected, got)
 				}
-				if got, expected := tbl.Rows[0].Cells[5], "[1 2 3]"; got != expected {
+				if got, expected := tbl.Rows[0].Cells[5], "[1,2,3]"; got != expected {
 					t.Errorf("expected cell[5] to equal %q, got %q", expected, got)
 				}
 				// Validate extra column for v1
 				if i == 1 {
 					if got, expected := tbl.Rows[0].Cells[6], int64(5); got != expected {
-						t.Errorf("expected cell[6] to equal %q, got %q", expected, got)
+						t.Errorf("expected cell[6] to equal %v, got %v", expected, got)
 					}
 				}
 			}
@@ -376,8 +378,8 @@ func TestColumnsPatch(t *testing.T) {
 	}
 
 	// CRD with no top-level and per-version columns should be created successfully
-	crd := NewNoxuSubresourcesCRDs(apiextensionsv1beta1.NamespaceScoped)[0]
-	crd, err = fixtures.CreateNewCustomResourceDefinition(crd, apiExtensionClient, dynamicClient)
+	crd := NewNoxuSubresourcesCRDs(apiextensionsv1.NamespaceScoped)[0]
+	crd, err = fixtures.CreateNewV1CustomResourceDefinition(crd, apiExtensionClient, dynamicClient)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -385,14 +387,50 @@ func TestColumnsPatch(t *testing.T) {
 	// One should be able to patch the CRD to use per-version columns. The top-level columns
 	// should not be defaulted during creation, and apiserver should not return validation
 	// error about top-level and per-version columns being mutual exclusive.
-	patch := []byte(`{"spec":{"versions":[{"name":"v1beta1","served":true,"storage":true,"additionalPrinterColumns":[{"name":"Age","type":"date","JSONPath":".metadata.creationTimestamp"}]},{"name":"v1","served":true,"storage":false,"additionalPrinterColumns":[{"name":"Age2","type":"date","JSONPath":".metadata.creationTimestamp"}]}]}}`)
+	patch := []byte(`{
+  "spec": {
+    "versions": [
+      {
+        "name": "v1beta1",
+        "served": true,
+        "storage": true,
+        "additionalPrinterColumns": [
+          {
+            "name": "Age",
+            "type": "date",
+            "jsonPath": ".metadata.creationTimestamp"
+          }
+        ],
+        "schema": {
+          "openAPIV3Schema": {"x-kubernetes-preserve-unknown-fields": true, "type": "object"}
+        }
+      },
+      {
+        "name": "v1",
+        "served": true,
+        "storage": false,
+        "additionalPrinterColumns": [
+          {
+            "name": "Age2",
+            "type": "date",
+            "jsonPath": ".metadata.creationTimestamp"
+          }
+        ],
+        "schema": {
+          "openAPIV3Schema": {"x-kubernetes-preserve-unknown-fields": true, "type": "object"}
+        }
+      }
+    ]
+  }
+}
+`)
 
-	_, err = apiExtensionClient.ApiextensionsV1beta1().CustomResourceDefinitions().Patch(crd.Name, types.MergePatchType, patch)
+	_, err = apiExtensionClient.ApiextensionsV1().CustomResourceDefinitions().Patch(context.TODO(), crd.Name, types.MergePatchType, patch, metav1.PatchOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	crd, err = apiExtensionClient.ApiextensionsV1beta1().CustomResourceDefinitions().Get(crd.Name, metav1.GetOptions{})
+	crd, err = apiExtensionClient.ApiextensionsV1().CustomResourceDefinitions().Get(context.TODO(), crd.Name, metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -419,11 +457,11 @@ func TestPatchCleanTopLevelColumns(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	crd := NewNoxuSubresourcesCRDs(apiextensionsv1beta1.NamespaceScoped)[0]
-	crd.Spec.AdditionalPrinterColumns = []apiextensionsv1beta1.CustomResourceColumnDefinition{
+	crd := NewNoxuSubresourcesCRDs(apiextensionsv1.NamespaceScoped)[0]
+	crd.Spec.Versions[0].AdditionalPrinterColumns = []apiextensionsv1.CustomResourceColumnDefinition{
 		{Name: "Age", Type: "date", Description: swaggerMetadataDescriptions["creationTimestamp"], JSONPath: ".metadata.creationTimestamp"},
 	}
-	crd, err = fixtures.CreateNewCustomResourceDefinition(crd, apiExtensionClient, dynamicClient)
+	crd, err = fixtures.CreateNewV1CustomResourceDefinition(crd, apiExtensionClient, dynamicClient)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -431,14 +469,51 @@ func TestPatchCleanTopLevelColumns(t *testing.T) {
 
 	// One should be able to patch the CRD to use per-version columns by cleaning
 	// the top-level columns.
-	patch := []byte(`{"spec":{"additionalPrinterColumns":null,"versions":[{"name":"v1beta1","served":true,"storage":true,"additionalPrinterColumns":[{"name":"Age","type":"date","JSONPath":".metadata.creationTimestamp"}]},{"name":"v1","served":true,"storage":false,"additionalPrinterColumns":[{"name":"Age2","type":"date","JSONPath":".metadata.creationTimestamp"}]}]}}`)
+	patch := []byte(`{
+  "spec": {
+    "additionalPrinterColumns": null,
+    "versions": [
+      {
+        "name": "v1beta1",
+        "served": true,
+        "storage": true,
+        "additionalPrinterColumns": [
+          {
+            "name": "Age",
+            "type": "date",
+            "jsonPath": ".metadata.creationTimestamp"
+          }
+        ],
+        "schema": {
+          "openAPIV3Schema": {"x-kubernetes-preserve-unknown-fields": true, "type": "object"}
+        }
+      },
+      {
+        "name": "v1",
+        "served": true,
+        "storage": false,
+        "additionalPrinterColumns": [
+          {
+            "name": "Age2",
+            "type": "date",
+            "jsonPath": ".metadata.creationTimestamp"
+          }
+        ],
+        "schema": {
+          "openAPIV3Schema": {"x-kubernetes-preserve-unknown-fields": true, "type": "object"}
+        }
+      }
+    ]
+  }
+}
+`)
 
-	_, err = apiExtensionClient.ApiextensionsV1beta1().CustomResourceDefinitions().Patch(crd.Name, types.MergePatchType, patch)
+	_, err = apiExtensionClient.ApiextensionsV1().CustomResourceDefinitions().Patch(context.TODO(), crd.Name, types.MergePatchType, patch, metav1.PatchOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	crd, err = apiExtensionClient.ApiextensionsV1beta1().CustomResourceDefinitions().Get(crd.Name, metav1.GetOptions{})
+	crd, err = apiExtensionClient.ApiextensionsV1().CustomResourceDefinitions().Get(context.TODO(), crd.Name, metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

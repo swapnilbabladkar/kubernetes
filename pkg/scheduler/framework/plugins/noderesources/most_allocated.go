@@ -17,49 +17,49 @@ limitations under the License.
 package noderesources
 
 import (
-	"context"
-	"fmt"
-
-	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/kubernetes/pkg/scheduler/algorithm/priorities"
-	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/migration"
-	framework "k8s.io/kubernetes/pkg/scheduler/framework/v1alpha1"
+	fwk "k8s.io/kube-scheduler/framework"
+	"k8s.io/kubernetes/pkg/scheduler/apis/config"
 )
 
-// MostAllocated is a score plugin that favors nodes with high allocation based on requested resources.
-type MostAllocated struct {
-	handle framework.FrameworkHandle
+// mostResourceScorer favors nodes with most requested resources.
+// It calculates the percentage of memory and CPU requested by pods scheduled on the node, and prioritizes
+// based on the maximum of the average of the fraction of requested to capacity.
+//
+// Details:
+// (cpu(MaxNodeScore * requested * cpuWeight / capacity) + memory(MaxNodeScore * requested * memoryWeight / capacity) + ...) / weightSum
+func mostResourceScorer(resources []config.ResourceSpec) func(requested, _, allocable []int64) int64 {
+	return func(requested, _, allocable []int64) int64 {
+		var nodeScore, weightSum int64
+		for i := range requested {
+			if allocable[i] == 0 {
+				continue
+			}
+			weight := resources[i].Weight
+			resourceScore := mostRequestedScore(requested[i], allocable[i])
+			nodeScore += resourceScore * weight
+			weightSum += weight
+		}
+		if weightSum == 0 {
+			return 0
+		}
+		return nodeScore / weightSum
+	}
 }
 
-var _ = framework.ScorePlugin(&MostAllocated{})
-
-// MostAllocatedName is the name of the plugin used in the plugin registry and configurations.
-const MostAllocatedName = "NodeResourcesMostAllocated"
-
-// Name returns name of the plugin. It is used in logs, etc.
-func (ma *MostAllocated) Name() string {
-	return MostAllocatedName
-}
-
-// Score invoked at the Score extension point.
-func (ma *MostAllocated) Score(ctx context.Context, state *framework.CycleState, pod *v1.Pod, nodeName string) (int64, *framework.Status) {
-	nodeInfo, err := ma.handle.SnapshotSharedLister().NodeInfos().Get(nodeName)
-	if err != nil {
-		return 0, framework.NewStatus(framework.Error, fmt.Sprintf("getting node %q from Snapshot: %v", nodeName, err))
+// The used capacity is calculated on a scale of 0-MaxNodeScore (MaxNodeScore is
+// constant with value set to 100).
+// 0 being the lowest priority and 100 being the highest.
+// The more resources are used the higher the score is. This function
+// is almost a reversed version of noderesources.leastRequestedScore.
+func mostRequestedScore(requested, capacity int64) int64 {
+	if capacity == 0 {
+		return 0
+	}
+	if requested > capacity {
+		// `requested` might be greater than `capacity` because pods with no
+		// requests get minimum values.
+		requested = capacity
 	}
 
-	// MostRequestedPriorityMap does not use priority metadata, hence we pass nil here
-	s, err := priorities.MostRequestedPriorityMap(pod, nil, nodeInfo)
-	return s.Score, migration.ErrorToFrameworkStatus(err)
-}
-
-// ScoreExtensions of the Score plugin.
-func (ma *MostAllocated) ScoreExtensions() framework.ScoreExtensions {
-	return nil
-}
-
-// NewMostAllocated initializes a new plugin and returns it.
-func NewMostAllocated(_ *runtime.Unknown, h framework.FrameworkHandle) (framework.Plugin, error) {
-	return &MostAllocated{handle: h}, nil
+	return (requested * fwk.MaxNodeScore) / capacity
 }

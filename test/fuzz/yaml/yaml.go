@@ -20,9 +20,10 @@ limitations under the License.
 package yaml
 
 import (
-	"bytes"
+	"fmt"
+	"strings"
 
-	"gopkg.in/yaml.v2"
+	yaml "go.yaml.in/yaml/v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	sigyaml "sigs.k8s.io/yaml"
 )
@@ -41,8 +42,12 @@ func FuzzDurationStrict(b []byte) int {
 	if err != nil {
 		panic(err)
 	}
-	if !bytes.Equal(result, b) {
-		panic("result != input")
+	// Result is in the format "d: <duration>\n", so strip off the trailing
+	// newline and convert durationHolder.D to the expected format.
+	resultStr := strings.TrimSpace(string(result[:]))
+	inputStr := fmt.Sprintf("d: %s", durationHolder.D.Duration)
+	if resultStr != inputStr {
+		panic(fmt.Sprintf("result(%v) != input(%v)", resultStr, inputStr))
 	}
 	return 1
 }
@@ -61,8 +66,18 @@ func FuzzMicroTimeStrict(b []byte) int {
 	if err != nil {
 		panic(err)
 	}
-	if !bytes.Equal(result, b) {
-		panic("result != input")
+	// Result is in the format "t: <time>\n", so strip off the trailing
+	// newline and convert microTimeHolder.T to the expected format. If
+	// time is zero, the value is marshaled to "null".
+	resultStr := strings.TrimSpace(string(result[:]))
+	var inputStr string
+	if microTimeHolder.T.Time.IsZero() {
+		inputStr = "t: null"
+	} else {
+		inputStr = fmt.Sprintf("t: %s", microTimeHolder.T.Time)
+	}
+	if resultStr != inputStr {
+		panic(fmt.Sprintf("result(%v) != input(%v)", resultStr, inputStr))
 	}
 	return 1
 }
@@ -95,13 +110,23 @@ func FuzzTimeStrict(b []byte) int {
 	if err != nil {
 		panic(err)
 	}
-	if !bytes.Equal(result, b) {
-		panic("result != input")
+	// Result is in the format "t: <time>\n", so strip off the trailing
+	// newline and convert timeHolder.T to the expected format. If time is
+	// zero, the value is marshaled to "null".
+	resultStr := strings.TrimSpace(string(result[:]))
+	var inputStr string
+	if timeHolder.T.Time.IsZero() {
+		inputStr = "t: null"
+	} else {
+		inputStr = fmt.Sprintf("t: %s", timeHolder.T.Time)
+	}
+	if resultStr != inputStr {
+		panic(fmt.Sprintf("result(%v) != input(%v)", resultStr, inputStr))
 	}
 	return 1
 }
 
-// FuzzYamlV2 is a fuzz target for "gopkg.in/yaml.v2" unmarshaling.
+// FuzzYamlV2 is a fuzz target for "go.yaml.in/yaml/v2" unmarshaling.
 func FuzzYamlV2(b []byte) int {
 	t := struct{}{}
 	m := map[string]interface{}{}

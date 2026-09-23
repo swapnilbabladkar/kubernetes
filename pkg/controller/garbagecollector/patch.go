@@ -17,8 +17,10 @@ limitations under the License.
 package garbagecollector
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -27,33 +29,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/kubernetes/pkg/controller/garbagecollector/metaonly"
 )
-
-type objectForDeleteOwnerRefStrategicMergePatch struct {
-	Metadata objectMetaForMergePatch `json:"metadata"`
-}
-
-type objectMetaForMergePatch struct {
-	UID             types.UID           `json:"uid"`
-	OwnerReferences []map[string]string `json:"ownerReferences"`
-}
-
-func deleteOwnerRefStrategicMergePatch(dependentUID types.UID, ownerUIDs ...types.UID) []byte {
-	var pieces []map[string]string
-	for _, ownerUID := range ownerUIDs {
-		pieces = append(pieces, map[string]string{"$patch": "delete", "uid": string(ownerUID)})
-	}
-	patch := objectForDeleteOwnerRefStrategicMergePatch{
-		Metadata: objectMetaForMergePatch{
-			UID:             dependentUID,
-			OwnerReferences: pieces,
-		},
-	}
-	patchBytes, err := json.Marshal(&patch)
-	if err != nil {
-		return []byte{}
-	}
-	return patchBytes
-}
 
 // getMetadata tries getting object metadata from local cache, and sends GET request to apiserver when
 // local cache is not available or not latest.
@@ -67,7 +42,7 @@ func (gc *GarbageCollector) getMetadata(apiVersion, kind, namespace, name string
 	m, ok := gc.dependencyGraphBuilder.monitors[apiResource]
 	if !ok || m == nil {
 		// If local cache doesn't exist for mapping.Resource, send a GET request to API server
-		return gc.metadataClient.Resource(apiResource).Namespace(namespace).Get(name, metav1.GetOptions{})
+		return gc.metadataClient.Resource(apiResource).Namespace(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 	}
 	key := name
 	if len(namespace) != 0 {
@@ -79,7 +54,7 @@ func (gc *GarbageCollector) getMetadata(apiVersion, kind, namespace, name string
 	}
 	if !exist {
 		// If local cache doesn't contain the object, send a GET request to API server
-		return gc.metadataClient.Resource(apiResource).Namespace(namespace).Get(name, metav1.GetOptions{})
+		return gc.metadataClient.Resource(apiResource).Namespace(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 	}
 	obj, ok := raw.(runtime.Object)
 	if !ok {
@@ -92,6 +67,7 @@ type objectForFinalizersPatch struct {
 	ObjectMetaForFinalizersPatch `json:"metadata"`
 }
 
+// ObjectMetaForFinalizersPatch defines object meta struct for finalizers patch operation.
 type ObjectMetaForFinalizersPatch struct {
 	ResourceVersion string   `json:"resourceVersion"`
 	Finalizers      []string `json:"finalizers"`
@@ -101,6 +77,7 @@ type objectForPatch struct {
 	ObjectMetaForPatch `json:"metadata"`
 }
 
+// ObjectMetaForPatch defines object meta struct for patch operation.
 type ObjectMetaForPatch struct {
 	ResourceVersion string                  `json:"resourceVersion"`
 	OwnerReferences []metav1.OwnerReference `json:"ownerReferences"`
@@ -138,14 +115,7 @@ func (gc *GarbageCollector) deleteOwnerRefJSONMergePatch(item *node, ownerUIDs .
 	expectedObjectMeta.ResourceVersion = accessor.GetResourceVersion()
 	refs := accessor.GetOwnerReferences()
 	for _, ref := range refs {
-		var skip bool
-		for _, ownerUID := range ownerUIDs {
-			if ref.UID == ownerUID {
-				skip = true
-				break
-			}
-		}
-		if !skip {
+		if !slices.Contains(ownerUIDs, ref.UID) {
 			expectedObjectMeta.OwnerReferences = append(expectedObjectMeta.OwnerReferences, ref)
 		}
 	}
@@ -158,7 +128,7 @@ func (n *node) unblockOwnerReferencesStrategicMergePatch() ([]byte, error) {
 	var dummy metaonly.MetadataOnlyObject
 	var blockingRefs []metav1.OwnerReference
 	falseVar := false
-	for _, owner := range n.owners {
+	for _, owner := range n.getOwners() {
 		if owner.BlockOwnerDeletion != nil && *owner.BlockOwnerDeletion {
 			ref := owner
 			ref.BlockOwnerDeletion = &falseVar
@@ -181,7 +151,7 @@ func (gc *GarbageCollector) unblockOwnerReferencesJSONMergePatch(n *node) ([]byt
 	expectedObjectMeta.ResourceVersion = accessor.GetResourceVersion()
 	var expectedOwners []metav1.OwnerReference
 	falseVar := false
-	for _, owner := range n.owners {
+	for _, owner := range n.getOwners() {
 		owner.BlockOwnerDeletion = &falseVar
 		expectedOwners = append(expectedOwners, owner)
 	}

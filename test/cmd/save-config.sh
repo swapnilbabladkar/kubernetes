@@ -63,21 +63,21 @@ run_save_config_tests() {
   # Clean up
   kubectl delete -f hack/testdata/pod.yaml "${kube_flags[@]}"
   ## 4. kubectl run --save-config should generate configuration annotation
-  # Pre-Condition: no RC exists
-  kube::test::get_object_assert rc "{{range.items}}{{$id_field}}:{{end}}" ''
-  # Command: create the rc "nginx" with image nginx
-  kubectl run nginx "--image=$IMAGE_NGINX" --save-config --generator=run/v1 "${kube_flags[@]}"
-  # Post-Condition: rc "nginx" has configuration annotation
-  grep -q "kubectl.kubernetes.io/last-applied-configuration" <<< "$(kubectl get rc nginx -o yaml "${kube_flags[@]}")"
+  # Pre-Condition: no pods exists
+  kube::test::get_object_assert pods "{{range.items}}{{$id_field}}:{{end}}" ''
+  # Command: create the pod "nginx" with image nginx
+  kubectl run nginx "--image=$IMAGE_NGINX" --save-config "${kube_flags[@]}"
+  # Post-Condition: pod "nginx" has configuration annotation
+  grep -q "kubectl.kubernetes.io/last-applied-configuration" <<< "$(kubectl get pod nginx -o yaml "${kube_flags[@]}")"
   ## 5. kubectl expose --save-config should generate configuration annotation
   # Pre-Condition: no service exists
   kube::test::get_object_assert svc "{{range.items}}{{$id_field}}:{{end}}" ''
   # Command: expose the rc "nginx"
-  kubectl expose rc nginx --save-config --port=80 --target-port=8000 "${kube_flags[@]}"
+  kubectl expose pod nginx --save-config --port=80 --target-port=8000 "${kube_flags[@]}"
   # Post-Condition: service "nginx" has configuration annotation
   grep -q "kubectl.kubernetes.io/last-applied-configuration" <<< "$(kubectl get svc nginx -o yaml "${kube_flags[@]}")"
   # Clean up
-  kubectl delete rc,svc nginx
+  kubectl delete pod,svc nginx
   ## 6. kubectl autoscale --save-config should generate configuration annotation
   # Pre-Condition: no RC exists, then create the rc "frontend", which shouldn't have configuration annotation
   kube::test::get_object_assert rc "{{range.items}}{{$id_field}}:{{end}}" ''
@@ -87,14 +87,14 @@ run_save_config_tests() {
   kubectl autoscale -f hack/testdata/frontend-controller.yaml --save-config "${kube_flags[@]}" --max=2
   # Post-Condition: hpa "frontend" has configuration annotation
   grep -q "kubectl.kubernetes.io/last-applied-configuration" <<< "$(kubectl get hpa frontend -o yaml "${kube_flags[@]}")"
-  # Ensure we can interact with HPA objects in lists through autoscaling/v1 APIs
+  # Ensure we can interact with HPA objects in lists through autoscaling/v2 APIs
   output_message=$(kubectl get hpa -o=jsonpath='{.items[0].apiVersion}' 2>&1 "${kube_flags[@]}")
-  kube::test::if_has_string "${output_message}" 'autoscaling/v1'
+  kube::test::if_has_string "${output_message}" 'autoscaling/v2'
   output_message=$(kubectl get hpa.autoscaling -o=jsonpath='{.items[0].apiVersion}' 2>&1 "${kube_flags[@]}")
-  kube::test::if_has_string "${output_message}" 'autoscaling/v1'
+  kube::test::if_has_string "${output_message}" 'autoscaling/v2'
   # tests kubectl group prefix matching
   output_message=$(kubectl get hpa.autoscal -o=jsonpath='{.items[0].apiVersion}' 2>&1 "${kube_flags[@]}")
-  kube::test::if_has_string "${output_message}" 'autoscaling/v1'
+  kube::test::if_has_string "${output_message}" 'autoscaling/v2'
   # Clean up
   # Note that we should delete hpa first, otherwise it may fight with the rc reaper.
   kubectl delete hpa frontend "${kube_flags[@]}"

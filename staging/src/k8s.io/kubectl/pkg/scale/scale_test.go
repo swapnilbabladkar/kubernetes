@@ -17,13 +17,14 @@ limitations under the License.
 package scale
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
 
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
-	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	api "k8s.io/apimachinery/pkg/apis/testapigroup/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -58,8 +59,8 @@ var (
 )
 
 func TestReplicationControllerScaleRetry(t *testing.T) {
-	verbsOnError := map[string]*kerrors.StatusError{
-		"patch": kerrors.NewConflict(api.Resource("Status"), "foo", nil),
+	verbsOnError := map[string]*apierrors.StatusError{
+		"patch": apierrors.NewConflict(api.Resource("Status"), "foo", nil),
 	}
 	scaleClientExpectedAction := []string{"patch", "get"}
 	scaleClient := createFakeScaleClient("replicationcontrollers", "foo-v1", 2, verbsOnError)
@@ -68,8 +69,9 @@ func TestReplicationControllerScaleRetry(t *testing.T) {
 	name := "foo-v1"
 	namespace := metav1.NamespaceDefault
 
-	scaleFunc := ScaleCondition(scaler, nil, namespace, name, count, nil, rcgvr)
-	pass, err := scaleFunc()
+	actualSize := new(int32)
+	scaleFunc := ScaleCondition(scaler, nil, namespace, name, count, nil, actualSize, rcgvr, false)
+	pass, err := scaleFunc(context.Background())
 	if pass {
 		t.Errorf("Expected an update failure to return pass = false, got pass = %v", pass)
 	}
@@ -77,8 +79,8 @@ func TestReplicationControllerScaleRetry(t *testing.T) {
 		t.Errorf("Did not expect an error on update conflict failure, got %v", err)
 	}
 	preconditions := ScalePrecondition{3, ""}
-	scaleFunc = ScaleCondition(scaler, &preconditions, namespace, name, count, nil, rcgvr)
-	pass, err = scaleFunc()
+	scaleFunc = ScaleCondition(scaler, &preconditions, namespace, name, count, nil, actualSize, rcgvr, false)
+	_, err = scaleFunc(context.Background())
 	if err == nil {
 		t.Errorf("Expected error on precondition failure")
 	}
@@ -94,8 +96,8 @@ func TestReplicationControllerScaleRetry(t *testing.T) {
 }
 
 func TestReplicationControllerScaleInvalid(t *testing.T) {
-	verbsOnError := map[string]*kerrors.StatusError{
-		"patch": kerrors.NewInvalid(api.Kind("Status"), "foo", nil),
+	verbsOnError := map[string]*apierrors.StatusError{
+		"patch": apierrors.NewInvalid(api.Kind("Status"), "foo", nil),
 	}
 	scaleClientExpectedAction := []string{"patch"}
 	scaleClient := createFakeScaleClient("replicationcontrollers", "foo-v1", 1, verbsOnError)
@@ -104,8 +106,8 @@ func TestReplicationControllerScaleInvalid(t *testing.T) {
 	name := "foo-v1"
 	namespace := "default"
 
-	scaleFunc := ScaleCondition(scaler, nil, namespace, name, count, nil, rcgvr)
-	pass, err := scaleFunc()
+	scaleFunc := ScaleCondition(scaler, nil, namespace, name, count, nil, nil, rcgvr, false)
+	pass, err := scaleFunc(context.Background())
 	if pass {
 		t.Errorf("Expected an update failure to return pass = false, got pass = %v", pass)
 	}
@@ -129,10 +131,14 @@ func TestReplicationControllerScale(t *testing.T) {
 	scaler := NewScaler(scaleClient)
 	count := uint(3)
 	name := "foo-v1"
-	err := scaler.Scale("default", name, count, nil, nil, nil, rcgvr)
+	actualSize := new(int32)
+	err := scaler.Scale("default", name, count, actualSize, nil, nil, nil, rcgvr, false)
 
 	if err != nil {
 		t.Fatalf("unexpected error occurred = %v while scaling the resource", err)
+	}
+	if *actualSize != 3 {
+		t.Errorf("expected actualSize to be 3, got %d", *actualSize)
 	}
 	actions := scaleClient.Actions()
 	if len(actions) != len(scaleClientExpectedAction) {
@@ -152,7 +158,7 @@ func TestReplicationControllerScaleFailsPreconditions(t *testing.T) {
 	preconditions := ScalePrecondition{2, ""}
 	count := uint(3)
 	name := "foo"
-	err := scaler.Scale("default", name, count, &preconditions, nil, nil, rcgvr)
+	err := scaler.Scale("default", name, count, nil, &preconditions, nil, nil, rcgvr, false)
 	if err == nil {
 		t.Fatal("expected to get an error but none was returned")
 	}
@@ -168,8 +174,8 @@ func TestReplicationControllerScaleFailsPreconditions(t *testing.T) {
 }
 
 func TestDeploymentScaleRetry(t *testing.T) {
-	verbsOnError := map[string]*kerrors.StatusError{
-		"patch": kerrors.NewConflict(api.Resource("Status"), "foo", nil),
+	verbsOnError := map[string]*apierrors.StatusError{
+		"patch": apierrors.NewConflict(api.Resource("Status"), "foo", nil),
 	}
 	scaleClientExpectedAction := []string{"patch", "get"}
 	scaleClient := createFakeScaleClient("deployments", "foo", 2, verbsOnError)
@@ -178,8 +184,8 @@ func TestDeploymentScaleRetry(t *testing.T) {
 	name := "foo"
 	namespace := "default"
 
-	scaleFunc := ScaleCondition(scaler, nil, namespace, name, count, nil, deploygvr)
-	pass, err := scaleFunc()
+	scaleFunc := ScaleCondition(scaler, nil, namespace, name, count, nil, nil, deploygvr, false)
+	pass, err := scaleFunc(context.Background())
 	if pass != false {
 		t.Errorf("Expected an update failure to return pass = false, got pass = %v", pass)
 	}
@@ -187,8 +193,8 @@ func TestDeploymentScaleRetry(t *testing.T) {
 		t.Errorf("Did not expect an error on update failure, got %v", err)
 	}
 	preconditions := &ScalePrecondition{3, ""}
-	scaleFunc = ScaleCondition(scaler, preconditions, namespace, name, count, nil, deploygvr)
-	pass, err = scaleFunc()
+	scaleFunc = ScaleCondition(scaler, preconditions, namespace, name, count, nil, nil, deploygvr, false)
+	_, err = scaleFunc(context.Background())
 	if err == nil {
 		t.Error("Expected error on precondition failure")
 	}
@@ -209,9 +215,13 @@ func TestDeploymentScale(t *testing.T) {
 	scaler := NewScaler(scaleClient)
 	count := uint(3)
 	name := "foo"
-	err := scaler.Scale("default", name, count, nil, nil, nil, deploygvr)
+	actualSize := new(int32)
+	err := scaler.Scale("default", name, count, actualSize, nil, nil, nil, deploygvr, false)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if *actualSize != 3 {
+		t.Errorf("expected actualSize to be 3, got %d", *actualSize)
 	}
 	actions := scaleClient.Actions()
 	if len(actions) != len(scaleClientExpectedAction) {
@@ -226,8 +236,8 @@ func TestDeploymentScale(t *testing.T) {
 
 func TestDeploymentScaleInvalid(t *testing.T) {
 	scaleClientExpectedAction := []string{"patch"}
-	verbsOnError := map[string]*kerrors.StatusError{
-		"patch": kerrors.NewInvalid(api.Kind("Status"), "foo", nil),
+	verbsOnError := map[string]*apierrors.StatusError{
+		"patch": apierrors.NewInvalid(api.Kind("Status"), "foo", nil),
 	}
 	scaleClient := createFakeScaleClient("deployments", "foo", 2, verbsOnError)
 	scaler := NewScaler(scaleClient)
@@ -235,8 +245,8 @@ func TestDeploymentScaleInvalid(t *testing.T) {
 	name := "foo"
 	namespace := "default"
 
-	scaleFunc := ScaleCondition(scaler, nil, namespace, name, count, nil, deploygvr)
-	pass, err := scaleFunc()
+	scaleFunc := ScaleCondition(scaler, nil, namespace, name, count, nil, nil, deploygvr, false)
+	pass, err := scaleFunc(context.Background())
 	if pass {
 		t.Errorf("Expected an update failure to return pass = false, got pass = %v", pass)
 	}
@@ -261,7 +271,7 @@ func TestDeploymentScaleFailsPreconditions(t *testing.T) {
 	preconditions := ScalePrecondition{2, ""}
 	count := uint(3)
 	name := "foo"
-	err := scaler.Scale("default", name, count, &preconditions, nil, nil, deploygvr)
+	err := scaler.Scale("default", name, count, nil, &preconditions, nil, nil, deploygvr, false)
 	if err == nil {
 		t.Fatal("exptected to get an error but none was returned")
 	}
@@ -282,9 +292,13 @@ func TestStatefulSetScale(t *testing.T) {
 	scaler := NewScaler(scaleClient)
 	count := uint(3)
 	name := "foo"
-	err := scaler.Scale("default", name, count, nil, nil, nil, stsgvr)
+	actualSize := new(int32)
+	err := scaler.Scale("default", name, count, actualSize, nil, nil, nil, stsgvr, false)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if *actualSize != 3 {
+		t.Errorf("expected actualSize to be 3, got %d", *actualSize)
 	}
 	actions := scaleClient.Actions()
 	if len(actions) != len(scaleClientExpectedAction) {
@@ -299,8 +313,8 @@ func TestStatefulSetScale(t *testing.T) {
 
 func TestStatefulSetScaleRetry(t *testing.T) {
 	scaleClientExpectedAction := []string{"patch", "get"}
-	verbsOnError := map[string]*kerrors.StatusError{
-		"patch": kerrors.NewConflict(api.Resource("Status"), "foo", nil),
+	verbsOnError := map[string]*apierrors.StatusError{
+		"patch": apierrors.NewConflict(api.Resource("Status"), "foo", nil),
 	}
 	scaleClient := createFakeScaleClient("statefulsets", "foo", 2, verbsOnError)
 	scaler := NewScaler(scaleClient)
@@ -308,8 +322,8 @@ func TestStatefulSetScaleRetry(t *testing.T) {
 	name := "foo"
 	namespace := "default"
 
-	scaleFunc := ScaleCondition(scaler, nil, namespace, name, count, nil, stsgvr)
-	pass, err := scaleFunc()
+	scaleFunc := ScaleCondition(scaler, nil, namespace, name, count, nil, nil, stsgvr, false)
+	pass, err := scaleFunc(context.Background())
 	if pass != false {
 		t.Errorf("Expected an update failure to return pass = false, got pass = %v", pass)
 	}
@@ -317,8 +331,8 @@ func TestStatefulSetScaleRetry(t *testing.T) {
 		t.Errorf("Did not expect an error on update failure, got %v", err)
 	}
 	preconditions := &ScalePrecondition{3, ""}
-	scaleFunc = ScaleCondition(scaler, preconditions, namespace, name, count, nil, stsgvr)
-	pass, err = scaleFunc()
+	scaleFunc = ScaleCondition(scaler, preconditions, namespace, name, count, nil, nil, stsgvr, false)
+	_, err = scaleFunc(context.Background())
 	if err == nil {
 		t.Error("Expected error on precondition failure")
 	}
@@ -335,8 +349,8 @@ func TestStatefulSetScaleRetry(t *testing.T) {
 
 func TestStatefulSetScaleInvalid(t *testing.T) {
 	scaleClientExpectedAction := []string{"patch"}
-	verbsOnError := map[string]*kerrors.StatusError{
-		"patch": kerrors.NewInvalid(api.Kind("Status"), "foo", nil),
+	verbsOnError := map[string]*apierrors.StatusError{
+		"patch": apierrors.NewInvalid(api.Kind("Status"), "foo", nil),
 	}
 	scaleClient := createFakeScaleClient("statefulsets", "foo", 2, verbsOnError)
 	scaler := NewScaler(scaleClient)
@@ -344,8 +358,8 @@ func TestStatefulSetScaleInvalid(t *testing.T) {
 	name := "foo"
 	namespace := "default"
 
-	scaleFunc := ScaleCondition(scaler, nil, namespace, name, count, nil, stsgvr)
-	pass, err := scaleFunc()
+	scaleFunc := ScaleCondition(scaler, nil, namespace, name, count, nil, nil, stsgvr, false)
+	pass, err := scaleFunc(context.Background())
 	if pass {
 		t.Errorf("Expected an update failure to return pass = false, got pass = %v", pass)
 	}
@@ -370,7 +384,7 @@ func TestStatefulSetScaleFailsPreconditions(t *testing.T) {
 	preconditions := ScalePrecondition{2, ""}
 	count := uint(3)
 	name := "foo"
-	err := scaler.Scale("default", name, count, &preconditions, nil, nil, stsgvr)
+	err := scaler.Scale("default", name, count, nil, &preconditions, nil, nil, stsgvr, false)
 	if err == nil {
 		t.Fatal("expected to get an error but none was returned")
 	}
@@ -391,9 +405,13 @@ func TestReplicaSetScale(t *testing.T) {
 	scaler := NewScaler(scaleClient)
 	count := uint(3)
 	name := "foo"
-	err := scaler.Scale("default", name, count, nil, nil, nil, rsgvr)
+	actualSize := new(int32)
+	err := scaler.Scale("default", name, count, actualSize, nil, nil, nil, rsgvr, false)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if *actualSize != 3 {
+		t.Errorf("expected actualSize to be 3, got %d", *actualSize)
 	}
 	actions := scaleClient.Actions()
 	if len(actions) != len(scaleClientExpectedAction) {
@@ -407,8 +425,8 @@ func TestReplicaSetScale(t *testing.T) {
 }
 
 func TestReplicaSetScaleRetry(t *testing.T) {
-	verbsOnError := map[string]*kerrors.StatusError{
-		"patch": kerrors.NewConflict(api.Resource("Status"), "foo", nil),
+	verbsOnError := map[string]*apierrors.StatusError{
+		"patch": apierrors.NewConflict(api.Resource("Status"), "foo", nil),
 	}
 	scaleClientExpectedAction := []string{"patch", "get"}
 	scaleClient := createFakeScaleClient("replicasets", "foo", 2, verbsOnError)
@@ -417,8 +435,8 @@ func TestReplicaSetScaleRetry(t *testing.T) {
 	name := "foo"
 	namespace := "default"
 
-	scaleFunc := ScaleCondition(scaler, nil, namespace, name, count, nil, rsgvr)
-	pass, err := scaleFunc()
+	scaleFunc := ScaleCondition(scaler, nil, namespace, name, count, nil, nil, rsgvr, false)
+	pass, err := scaleFunc(context.Background())
 	if pass != false {
 		t.Errorf("Expected an update failure to return pass = false, got pass = %v", pass)
 	}
@@ -426,8 +444,8 @@ func TestReplicaSetScaleRetry(t *testing.T) {
 		t.Errorf("Did not expect an error on update failure, got %v", err)
 	}
 	preconditions := &ScalePrecondition{3, ""}
-	scaleFunc = ScaleCondition(scaler, preconditions, namespace, name, count, nil, rsgvr)
-	pass, err = scaleFunc()
+	scaleFunc = ScaleCondition(scaler, preconditions, namespace, name, count, nil, nil, rsgvr, false)
+	_, err = scaleFunc(context.Background())
 	if err == nil {
 		t.Error("Expected error on precondition failure")
 	}
@@ -443,8 +461,8 @@ func TestReplicaSetScaleRetry(t *testing.T) {
 }
 
 func TestReplicaSetScaleInvalid(t *testing.T) {
-	verbsOnError := map[string]*kerrors.StatusError{
-		"patch": kerrors.NewInvalid(api.Kind("Status"), "foo", nil),
+	verbsOnError := map[string]*apierrors.StatusError{
+		"patch": apierrors.NewInvalid(api.Kind("Status"), "foo", nil),
 	}
 	scaleClientExpectedAction := []string{"patch"}
 	scaleClient := createFakeScaleClient("replicasets", "foo", 2, verbsOnError)
@@ -453,8 +471,8 @@ func TestReplicaSetScaleInvalid(t *testing.T) {
 	name := "foo"
 	namespace := "default"
 
-	scaleFunc := ScaleCondition(scaler, nil, namespace, name, count, nil, rsgvr)
-	pass, err := scaleFunc()
+	scaleFunc := ScaleCondition(scaler, nil, namespace, name, count, nil, nil, rsgvr, false)
+	pass, err := scaleFunc(context.Background())
 	if pass {
 		t.Errorf("Expected an update failure to return pass = false, got pass = %v", pass)
 	}
@@ -479,7 +497,7 @@ func TestReplicaSetsGetterFailsPreconditions(t *testing.T) {
 	preconditions := ScalePrecondition{2, ""}
 	count := uint(3)
 	name := "foo"
-	err := scaler.Scale("default", name, count, &preconditions, nil, nil, rsgvr)
+	err := scaler.Scale("default", name, count, nil, &preconditions, nil, nil, rsgvr, false)
 	if err == nil {
 		t.Fatal("expected to get an error but non was returned")
 	}
@@ -575,13 +593,16 @@ func TestGenericScaleSimple(t *testing.T) {
 		t.Run(fmt.Sprintf("running scenario %d: %s", index+1, scenario.name), func(t *testing.T) {
 			target := NewScaler(scenario.scaleGetter)
 
-			resVersion, err := target.ScaleSimple("default", scenario.resName, scenario.precondition, uint(scenario.newSize), scenario.targetGVR)
+			resVersion, actualSize, err := target.ScaleSimple("default", scenario.resName, scenario.precondition, uint(scenario.newSize), scenario.targetGVR, false)
 
 			if scenario.expectError && err == nil {
 				t.Fatal("expected an error but was not returned")
 			}
 			if !scenario.expectError && err != nil {
 				t.Fatalf("unexpected error: %v", err)
+			}
+			if !scenario.expectError && actualSize != int32(scenario.newSize) {
+				t.Errorf("expected actualSize to be %d, got %d", scenario.newSize, actualSize)
 			}
 			if resVersion != "" {
 				t.Fatalf("unexpected resource version returned = %s, wanted = %s", resVersion, "")
@@ -665,13 +686,17 @@ func TestGenericScale(t *testing.T) {
 		t.Run(scenario.name, func(t *testing.T) {
 			target := NewScaler(scenario.scaleGetter)
 
-			err := target.Scale("default", scenario.resName, uint(scenario.newSize), scenario.precondition, nil, scenario.waitForReplicas, scenario.targetGVR)
+			actualSize := new(int32)
+			err := target.Scale("default", scenario.resName, uint(scenario.newSize), actualSize, scenario.precondition, nil, scenario.waitForReplicas, scenario.targetGVR, false)
 
 			if scenario.expectError && err == nil {
 				t.Fatal("expected an error but was not returned")
 			}
 			if !scenario.expectError && err != nil {
 				t.Fatalf("unexpected error: %v", err)
+			}
+			if !scenario.expectError && *actualSize != int32(scenario.newSize) {
+				t.Errorf("expected actualSize to be %d, got %d", scenario.newSize, *actualSize)
 			}
 		})
 	}
@@ -688,12 +713,12 @@ func TestGenericScale(t *testing.T) {
 	}
 }
 
-func createFakeScaleClient(resource string, resourceName string, replicas int, errorsOnVerb map[string]*kerrors.StatusError) *fakescale.FakeScaleClient {
-	shouldReturnAnError := func(verb string) (*kerrors.StatusError, bool) {
+func createFakeScaleClient(resource string, resourceName string, replicas int, errorsOnVerb map[string]*apierrors.StatusError) *fakescale.FakeScaleClient {
+	shouldReturnAnError := func(verb string) (*apierrors.StatusError, bool) {
 		if anError, anErrorExists := errorsOnVerb[verb]; anErrorExists {
 			return anError, true
 		}
-		return &kerrors.StatusError{}, false
+		return &apierrors.StatusError{}, false
 	}
 	newReplicas := int32(replicas)
 	scaleClient := &fakescale.FakeScaleClient{}

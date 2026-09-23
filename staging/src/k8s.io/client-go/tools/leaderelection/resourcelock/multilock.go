@@ -18,29 +18,34 @@ package resourcelock
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 const (
+	// Deprecated: UnknownLeader is only used by MultiLock, which is deprecated.
 	UnknownLeader = "leaderelection.k8s.io/unknown"
 )
 
-// MultiLock is used for lock's migration
+// Deprecated: MultiLock was used to facilitate migration from non-lease
+// based leader election to lease-based leader election. Support for
+// non-lease locks was removed in Kubernetes 1.28, making MultiLock
+// non-functional. Use LeaseLock directly instead.
 type MultiLock struct {
 	Primary   Interface
 	Secondary Interface
 }
 
 // Get returns the older election record of the lock
-func (ml *MultiLock) Get() (*LeaderElectionRecord, []byte, error) {
-	primary, primaryRaw, err := ml.Primary.Get()
+func (ml *MultiLock) Get(ctx context.Context) (*LeaderElectionRecord, []byte, error) {
+	primary, primaryRaw, err := ml.Primary.Get(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	secondary, secondaryRaw, err := ml.Secondary.Get()
+	secondary, secondaryRaw, err := ml.Secondary.Get(ctx)
 	if err != nil {
 		// Lock is held by old client
 		if apierrors.IsNotFound(err) && primary.HolderIdentity != ml.Identity() {
@@ -60,25 +65,25 @@ func (ml *MultiLock) Get() (*LeaderElectionRecord, []byte, error) {
 }
 
 // Create attempts to create both primary lock and secondary lock
-func (ml *MultiLock) Create(ler LeaderElectionRecord) error {
-	err := ml.Primary.Create(ler)
+func (ml *MultiLock) Create(ctx context.Context, ler LeaderElectionRecord) error {
+	err := ml.Primary.Create(ctx, ler)
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		return err
 	}
-	return ml.Secondary.Create(ler)
+	return ml.Secondary.Create(ctx, ler)
 }
 
 // Update will update and existing annotation on both two resources.
-func (ml *MultiLock) Update(ler LeaderElectionRecord) error {
-	err := ml.Primary.Update(ler)
+func (ml *MultiLock) Update(ctx context.Context, ler LeaderElectionRecord) error {
+	err := ml.Primary.Update(ctx, ler)
 	if err != nil {
 		return err
 	}
-	_, _, err = ml.Secondary.Get()
+	_, _, err = ml.Secondary.Get(ctx)
 	if err != nil && apierrors.IsNotFound(err) {
-		return ml.Secondary.Create(ler)
+		return ml.Secondary.Create(ctx, ler)
 	}
-	return ml.Secondary.Update(ler)
+	return ml.Secondary.Update(ctx, ler)
 }
 
 // RecordEvent in leader election while adding meta-data
@@ -98,6 +103,7 @@ func (ml *MultiLock) Identity() string {
 	return ml.Primary.Identity()
 }
 
+// Deprecated: ConcatRawRecord is only used by MultiLock, which is deprecated.
 func ConcatRawRecord(primaryRaw, secondaryRaw []byte) []byte {
 	return bytes.Join([][]byte{primaryRaw, secondaryRaw}, []byte(","))
 }

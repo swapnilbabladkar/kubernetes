@@ -17,54 +17,108 @@ limitations under the License.
 package clusterinfo
 
 import (
-	"io/ioutil"
 	"os"
-	"path"
+	"path/filepath"
+	"runtime"
 	"testing"
 
-	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/cli-runtime/pkg/genericiooptions"
 	cmdtesting "k8s.io/kubectl/pkg/cmd/testing"
 )
 
 func TestSetupOutputWriterNoOp(t *testing.T) {
-	tests := []string{"", "-"}
-	for _, test := range tests {
-		_, _, buf, _ := genericclioptions.NewTestIOStreams()
-		f := cmdtesting.NewTestFactory()
-		defer f.Cleanup()
+	tests := []struct {
+		name         string
+		outputWriter string
+	}{
+		{
+			name:         "empty",
+			outputWriter: "",
+		},
+		{
+			name:         "stdout",
+			outputWriter: "-",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, buf, _ := genericiooptions.NewTestIOStreams()
+			f := cmdtesting.NewTestFactory()
+			defer f.Cleanup()
 
-		writer := setupOutputWriter(test, buf, "/some/file/that/should/be/ignored")
-		if writer != buf {
-			t.Errorf("expected: %v, saw: %v", buf, writer)
-		}
+			writer := setupOutputWriter(tt.outputWriter, buf, "/some/file/that/should/be/ignored", "")
+			if writer != buf {
+				t.Errorf("expected: %v, saw: %v", buf, writer)
+			}
+		})
 	}
 }
 
 func TestSetupOutputWriterFile(t *testing.T) {
-	file := "output.json"
-	dir, err := ioutil.TempDir(os.TempDir(), "out")
+	file := "output"
+	extension := ".json"
+	dir, err := os.MkdirTemp(os.TempDir(), "out")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
-	fullPath := path.Join(dir, file)
+	fullPath := filepath.Join(dir, file) + extension
 	defer os.RemoveAll(dir)
 
-	_, _, buf, _ := genericclioptions.NewTestIOStreams()
+	_, _, buf, _ := genericiooptions.NewTestIOStreams()
 	f := cmdtesting.NewTestFactory()
 	defer f.Cleanup()
 
-	writer := setupOutputWriter(dir, buf, file)
+	writer := setupOutputWriter(dir, buf, file, extension)
 	if writer == buf {
 		t.Errorf("expected: %v, saw: %v", buf, writer)
 	}
 	output := "some data here"
 	writer.Write([]byte(output))
 
-	data, err := ioutil.ReadFile(fullPath)
+	data, err := os.ReadFile(fullPath)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 	if string(data) != output {
 		t.Errorf("expected: %v, saw: %v", output, data)
+	}
+}
+
+func TestSetupOutputWriterPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file modes are not enforced on windows")
+	}
+	file := filepath.Join("some-namespace", "some-pod", "logs")
+	extension := ".txt"
+	dir, err := os.MkdirTemp(os.TempDir(), "out")
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	fullPath := filepath.Join(dir, file) + extension
+	defer os.RemoveAll(dir)
+
+	_, _, buf, _ := genericiooptions.NewTestIOStreams()
+	f := cmdtesting.NewTestFactory()
+	defer f.Cleanup()
+
+	writer := setupOutputWriter(dir, buf, file, extension)
+	if writer == buf {
+		t.Errorf("expected: %v, saw: %v", buf, writer)
+	}
+
+	fileInfo, err := os.Stat(fullPath)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if fileInfo.Mode().Perm() != 0600 {
+		t.Errorf("expected file mode: %v, saw: %v", os.FileMode(0600), fileInfo.Mode().Perm())
+	}
+
+	dirInfo, err := os.Stat(filepath.Dir(fullPath))
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if dirInfo.Mode().Perm() != 0700 {
+		t.Errorf("expected directory mode: %v, saw: %v", os.FileMode(0700), dirInfo.Mode().Perm())
 	}
 }

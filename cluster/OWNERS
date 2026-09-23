@@ -1,20 +1,27 @@
 # See the OWNERS docs at https://go.k8s.io/owners
 
+options:
+  # make root approval non-recursive
+  no_parent_owners: true
 reviewers:
+  - aojea
   - bentheelder
-  - eparis
-  - Katharine
-  - mikedanese
-  - zmerlynn
+  - cheftako
   - dims
+  - justaugustus
+  - liggitt
+  - wojtek-t
 approvers:
-  - eparis
+  - aojea
+  - bentheelder
+  - cheftako
+  - dims
+  - liggitt
+  - wojtek-t
+emeritus_approvers:
   - mikedanese
   - spiffxp
-  - zmerlynn
-  - dims
-emeritus_approvers:
-  - roberthbailey   # 2019-03-08
+  - eparis
+  - roberthbailey # 2019-03-08
   - jbeda
-labels:
-- sig/cluster-lifecycle
+  - zmerlynn

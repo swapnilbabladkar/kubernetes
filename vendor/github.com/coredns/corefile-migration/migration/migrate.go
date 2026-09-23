@@ -6,8 +6,12 @@ package migration
 // helper functions that make this easier to implement.
 
 import (
+	"errors"
 	"fmt"
+	"regexp"
 	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/coredns/corefile-migration/migration/corefile"
 )
@@ -16,17 +20,23 @@ import (
 // any deprecated, removed, or ignored plugins/directives present in the Corefile.  Notifications are also returned for
 // any new default plugins that would be added in a migration.
 func Deprecated(fromCoreDNSVersion, toCoreDNSVersion, corefileStr string) ([]Notice, error) {
-	return getStatus(fromCoreDNSVersion, toCoreDNSVersion, corefileStr, all)
+	if fromCoreDNSVersion == toCoreDNSVersion {
+		return nil, nil
+	}
+	return getStatus(fromCoreDNSVersion, toCoreDNSVersion, corefileStr, SevAll)
 }
 
 // Unsupported returns a list notifications of plugins/options that are not handled supported by this migration tool,
 // but may still be valid in CoreDNS.
 func Unsupported(fromCoreDNSVersion, toCoreDNSVersion, corefileStr string) ([]Notice, error) {
-	return getStatus(fromCoreDNSVersion, toCoreDNSVersion, corefileStr, unsupported)
+	if fromCoreDNSVersion == toCoreDNSVersion {
+		return nil, nil
+	}
+	return getStatus(fromCoreDNSVersion, toCoreDNSVersion, corefileStr, SevUnsupported)
 }
 
 func getStatus(fromCoreDNSVersion, toCoreDNSVersion, corefileStr, status string) ([]Notice, error) {
-	err := validUpMigration(fromCoreDNSVersion, toCoreDNSVersion)
+	err := ValidUpMigration(fromCoreDNSVersion, toCoreDNSVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -43,17 +53,14 @@ func getStatus(fromCoreDNSVersion, toCoreDNSVersion, corefileStr, status string)
 		for _, s := range cf.Servers {
 			for _, p := range s.Plugins {
 				vp, present := Versions[v].plugins[p.Name]
-				if status == unsupported {
-					if present {
-						continue
-					}
+				if status == SevUnsupported && !present {
 					notices = append(notices, Notice{Plugin: p.Name, Severity: status, Version: v})
 					continue
 				}
 				if !present {
 					continue
 				}
-				if vp.status != "" && vp.status != newdefault {
+				if vp.status != "" && vp.status != SevNewDefault && status != SevUnsupported {
 					notices = append(notices, Notice{
 						Plugin:     p.Name,
 						Severity:   vp.status,
@@ -64,33 +71,31 @@ func getStatus(fromCoreDNSVersion, toCoreDNSVersion, corefileStr, status string)
 					continue
 				}
 				for _, o := range p.Options {
-					vo, present := Versions[v].plugins[p.Name].options[o.Name]
-					if status == unsupported {
+					vo, present := matchOption(o.Name, Versions[v].plugins[p.Name])
+					if status == SevUnsupported {
 						if present {
 							continue
 						}
 						notices = append(notices, Notice{
-							Plugin:     p.Name,
-							Option:     o.Name,
-							Severity:   status,
-							Version:    v,
-							ReplacedBy: vo.replacedBy,
-							Additional: vo.additional,
+							Plugin:   p.Name,
+							Option:   o.Name,
+							Severity: status,
+							Version:  v,
 						})
 						continue
 					}
 					if !present {
 						continue
 					}
-					if vo.status != "" && vo.status != newdefault {
+					if vo.status != "" && vo.status != SevNewDefault {
 						notices = append(notices, Notice{Plugin: p.Name, Option: o.Name, Severity: vo.status, Version: v})
 						continue
 					}
 				}
-				if status != unsupported {
+				if status != SevUnsupported {
 				CheckForNewOptions:
-					for name, vo := range Versions[v].plugins[p.Name].options {
-						if vo.status != newdefault {
+					for name, vo := range Versions[v].plugins[p.Name].namedOptions {
+						if vo.status != SevNewDefault {
 							continue
 						}
 						for _, o := range p.Options {
@@ -98,14 +103,14 @@ func getStatus(fromCoreDNSVersion, toCoreDNSVersion, corefileStr, status string)
 								continue CheckForNewOptions
 							}
 						}
-						notices = append(notices, Notice{Plugin: p.Name, Option: name, Severity: newdefault, Version: v})
+						notices = append(notices, Notice{Plugin: p.Name, Option: name, Severity: SevNewDefault, Version: v})
 					}
 				}
 			}
-			if status != unsupported {
+			if status != SevUnsupported {
 			CheckForNewPlugins:
 				for name, vp := range Versions[v].plugins {
-					if vp.status != newdefault {
+					if vp.status != SevNewDefault {
 						continue
 					}
 					for _, p := range s.Plugins {
@@ -113,7 +118,7 @@ func getStatus(fromCoreDNSVersion, toCoreDNSVersion, corefileStr, status string)
 							continue CheckForNewPlugins
 						}
 					}
-					notices = append(notices, Notice{Plugin: name, Option: "", Severity: newdefault, Version: v})
+					notices = append(notices, Notice{Plugin: name, Option: "", Severity: SevNewDefault, Version: v})
 				}
 			}
 		}
@@ -132,7 +137,7 @@ func Migrate(fromCoreDNSVersion, toCoreDNSVersion, corefileStr string, deprecati
 	if fromCoreDNSVersion == toCoreDNSVersion {
 		return corefileStr, nil
 	}
-	err := validUpMigration(fromCoreDNSVersion, toCoreDNSVersion)
+	err := ValidUpMigration(fromCoreDNSVersion, toCoreDNSVersion)
 	if err != nil {
 		return "", err
 	}
@@ -143,6 +148,15 @@ func Migrate(fromCoreDNSVersion, toCoreDNSVersion, corefileStr string, deprecati
 	v := fromCoreDNSVersion
 	for {
 		v = Versions[v].nextVersion
+
+		// apply any global corefile level pre-processing
+		if Versions[v].preProcess != nil {
+			cf, err = Versions[v].preProcess(cf)
+			if err != nil {
+				return "", err
+			}
+		}
+
 		newSrvs := []*corefile.Server{}
 		for _, s := range cf.Servers {
 			newPlugs := []*corefile.Plugin{}
@@ -152,28 +166,18 @@ func Migrate(fromCoreDNSVersion, toCoreDNSVersion, corefileStr string, deprecati
 					newPlugs = append(newPlugs, p)
 					continue
 				}
-				if !deprecations && vp.status == deprecated {
+				if !deprecations && vp.status == SevDeprecated {
 					newPlugs = append(newPlugs, p)
 					continue
 				}
-				if vp.action != nil {
-					p, err := vp.action(p)
-					if err != nil {
-						return "", err
-					}
-					if p == nil {
-						// remove plugin, skip options processing
-						continue
-					}
-				}
 				newOpts := []*corefile.Option{}
 				for _, o := range p.Options {
-					vo, present := Versions[v].plugins[p.Name].options[o.Name]
+					vo, present := matchOption(o.Name, Versions[v].plugins[p.Name])
 					if !present {
 						newOpts = append(newOpts, o)
 						continue
 					}
-					if !deprecations && vo.status == deprecated {
+					if !deprecations && vo.status == SevDeprecated {
 						newOpts = append(newOpts, o)
 						continue
 					}
@@ -191,14 +195,24 @@ func Migrate(fromCoreDNSVersion, toCoreDNSVersion, corefileStr string, deprecati
 					}
 					newOpts = append(newOpts, o)
 				}
+				if vp.action != nil {
+					p, err := vp.action(p)
+					if err != nil {
+						return "", err
+					}
+					if p == nil {
+						// remove plugin, skip options processing
+						continue
+					}
+				}
 				newPlug := &corefile.Plugin{
 					Name:    p.Name,
 					Args:    p.Args,
 					Options: newOpts,
 				}
 			CheckForNewOptions:
-				for name, vo := range Versions[v].plugins[p.Name].options {
-					if vo.status != newdefault {
+				for name, vo := range Versions[v].plugins[p.Name].namedOptions {
+					if vo.status != SevNewDefault {
 						continue
 					}
 					for _, o := range p.Options {
@@ -220,7 +234,7 @@ func Migrate(fromCoreDNSVersion, toCoreDNSVersion, corefileStr string, deprecati
 			}
 		CheckForNewPlugins:
 			for name, vp := range Versions[v].plugins {
-				if vp.status != newdefault {
+				if vp.status != SevNewDefault {
 					continue
 				}
 				for _, p := range s.Plugins {
@@ -294,7 +308,7 @@ func MigrateDown(fromCoreDNSVersion, toCoreDNSVersion, corefileStr string) (stri
 
 				newOpts := []*corefile.Option{}
 				for _, o := range p.Options {
-					vo, present := Versions[v].plugins[p.Name].options[o.Name]
+					vo, present := matchOption(o.Name, Versions[v].plugins[p.Name])
 					if !present {
 						newOpts = append(newOpts, o)
 						continue
@@ -398,24 +412,46 @@ func Released(dockerImageSHA string) bool {
 	return false
 }
 
+// VersionFromSHA returns the version string matching the dockerImageSHA.
+func VersionFromSHA(dockerImageSHA string) (string, error) {
+	for vStr, v := range Versions {
+		if v.dockerImageSHA == dockerImageSHA {
+			return vStr, nil
+		}
+	}
+	return "", errors.New("sha unsupported")
+}
+
 // ValidVersions returns a list of all versions defined
 func ValidVersions() []string {
 	var vStrs []string
 	for vStr := range Versions {
 		vStrs = append(vStrs, vStr)
 	}
-	sort.Strings(vStrs)
+	sort.Slice(vStrs, func(i, j int) bool {
+		iSegs := strings.Split(vStrs[i], ".")
+		jSegs := strings.Split(vStrs[j], ".")
+		for k, iSeg := range iSegs {
+			if iSeg == jSegs[k] {
+				continue
+			}
+			iInt, err := strconv.Atoi(iSeg)
+			if err != nil {
+				panic(err)
+			}
+			jInt, err := strconv.Atoi(jSegs[k])
+			if err != nil {
+				panic(err)
+			}
+			return iInt < jInt
+		}
+		return false
+	})
+
 	return vStrs
 }
 
-func validateVersion(fromCoreDNSVersion string) error {
-	if _, ok := Versions[fromCoreDNSVersion]; !ok {
-		return fmt.Errorf("start version '%v' not supported", fromCoreDNSVersion)
-	}
-	return nil
-}
-
-func validUpMigration(fromCoreDNSVersion, toCoreDNSVersion string) error {
+func ValidUpMigration(fromCoreDNSVersion, toCoreDNSVersion string) error {
 
 	err := validateVersion(fromCoreDNSVersion)
 	if err != nil {
@@ -433,6 +469,13 @@ func validUpMigration(fromCoreDNSVersion, toCoreDNSVersion string) error {
 	return fmt.Errorf("cannot migrate up to '%v' from '%v'", toCoreDNSVersion, fromCoreDNSVersion)
 }
 
+func validateVersion(fromCoreDNSVersion string) error {
+	if _, ok := Versions[fromCoreDNSVersion]; !ok {
+		return fmt.Errorf("start version '%v' not supported", fromCoreDNSVersion)
+	}
+	return nil
+}
+
 func validDownMigration(fromCoreDNSVersion, toCoreDNSVersion string) error {
 	err := validateVersion(fromCoreDNSVersion)
 	if err != nil {
@@ -445,4 +488,23 @@ func validDownMigration(fromCoreDNSVersion, toCoreDNSVersion string) error {
 		return nil
 	}
 	return fmt.Errorf("cannot migrate down to '%v' from '%v'", toCoreDNSVersion, fromCoreDNSVersion)
+}
+
+func matchOption(oName string, p plugin) (*option, bool) {
+	o, exists := p.namedOptions[oName]
+	if exists {
+		o.name = oName
+		return &o, exists
+	}
+	for pattern, o := range p.patternOptions {
+		matched, err := regexp.MatchString(pattern, oName)
+		if err != nil {
+			continue
+		}
+		if matched {
+			o.name = oName
+			return &o, true
+		}
+	}
+	return nil, false
 }

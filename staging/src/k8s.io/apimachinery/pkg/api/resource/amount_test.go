@@ -17,7 +17,10 @@ limitations under the License.
 package resource
 
 import (
+	"math"
 	"testing"
+
+	inf "gopkg.in/inf.v0"
 )
 
 func TestInt64AmountAsInt64(t *testing.T) {
@@ -30,7 +33,8 @@ func TestInt64AmountAsInt64(t *testing.T) {
 		{100, 0, 100, true},
 		{100, 1, 1000, true},
 		{100, -5, 0, false},
-		{100, 100, 0, false},
+		// overflow saturates to the sign-correct rail; ok stays false.
+		{100, 100, mostPositive, false},
 	} {
 		r, ok := int64Amount{value: test.value, scale: test.scale}.AsInt64()
 		if r != test.result {
@@ -88,6 +92,70 @@ func TestInt64AmountAdd(t *testing.T) {
 		}
 	}
 }
+
+func TestInt64AmountSubMostNegative(t *testing.T) {
+	// Sub can't form -mostNegative in an int64, so it declines the fast path and
+	// leaves the receiver untouched for Quantity.Sub to fall back from.
+	for _, test := range []struct {
+		name string
+		a    int64Amount
+		b    int64Amount
+	}{
+		{"unscaled", int64Amount{value: 1, scale: 0}, int64Amount{value: mostNegative, scale: 0}},
+		{"scaled", int64Amount{value: 1, scale: Milli}, int64Amount{value: mostNegative, scale: Milli}},
+	} {
+		got := test.a
+		if got.Sub(test.b) {
+			t.Errorf("%s: Sub(%v) = true, want false", test.name, test.b)
+		}
+		if got != test.a {
+			t.Errorf("%s: Sub(%v) mutated receiver to %v, want %v", test.name, test.b, got, test.a)
+		}
+	}
+}
+
+func TestInt64AmountMul(t *testing.T) {
+	for _, test := range []struct {
+		a  int64Amount
+		b  int64
+		c  int64Amount
+		ok bool
+	}{
+		{int64Amount{value: 100, scale: 1}, 1000, int64Amount{value: 100000, scale: 1}, true},
+		{int64Amount{value: 100, scale: -1}, 1000, int64Amount{value: 100000, scale: -1}, true},
+		{int64Amount{value: 1, scale: 100}, 10, int64Amount{value: 1, scale: 100}, false},
+		{int64Amount{value: 1, scale: -100}, 10, int64Amount{value: 1, scale: -100}, false},
+		{int64Amount{value: -5, scale: 2}, 500, int64Amount{value: -2500, scale: 2}, true},
+		{int64Amount{value: -5, scale: -2}, 500, int64Amount{value: -2500, scale: -2}, true},
+		{int64Amount{value: 0, scale: 1}, 0, int64Amount{value: 0, scale: 1}, true},
+
+		{int64Amount{value: mostPositive, scale: -1}, 10, int64Amount{value: mostPositive, scale: -1}, false},
+		{int64Amount{value: mostPositive, scale: -1}, 0, int64Amount{value: 0, scale: 0}, true},
+		{int64Amount{value: mostPositive, scale: 0}, 1, int64Amount{value: mostPositive, scale: 0}, true},
+		{int64Amount{value: mostPositive / 10, scale: 1}, 10, int64Amount{value: mostPositive / 10, scale: 1}, false},
+		{int64Amount{value: mostPositive, scale: 0}, -1, int64Amount{value: -mostPositive, scale: 0}, true},
+		{int64Amount{value: mostNegative, scale: 0}, 1, int64Amount{value: mostNegative, scale: 0}, true},
+		{int64Amount{value: mostNegative, scale: 1}, 0, int64Amount{value: 0, scale: 0}, true},
+		{int64Amount{value: mostNegative, scale: 1}, 1, int64Amount{value: mostNegative, scale: 1}, false},
+	} {
+		c := test.a
+		ok := c.Mul(test.b)
+		if ok && !test.ok {
+			t.Errorf("unextected success: %v", c)
+		} else if !ok && test.ok {
+			t.Errorf("unexpeted failure: %v", c)
+		} else if ok {
+			if c != test.c {
+				t.Errorf("%v: unexpected result: %d", test, c)
+			}
+		} else {
+			if c != test.a {
+				t.Errorf("%v: overflow multiplication mutated source: %d", test, c)
+			}
+		}
+	}
+}
+
 func TestInt64AsCanonicalString(t *testing.T) {
 	for _, test := range []struct {
 		value    int64
@@ -143,7 +211,7 @@ func TestInt64AmountAsScaledInt64(t *testing.T) {
 		{"test when i.scale < scaled ", int64Amount{value: 100, scale: 0}, 5, 1, true},
 		{"test when i.scale = scaled", int64Amount{value: 100, scale: 1}, 1, 100, true},
 		{"test when i.scale > scaled and result doesn't overflow", int64Amount{value: 100, scale: 5}, 2, 100000, true},
-		{"test when i.scale > scaled and result overflows", int64Amount{value: 876, scale: 30}, 4, 0, false},
+		{"test when i.scale > scaled and result overflows (saturates to the sign-correct rail)", int64Amount{value: 876, scale: 30}, 4, mostPositive, false},
 		{"test when i.scale < 0 and fraction exists", int64Amount{value: 93, scale: -1}, 0, 10, true},
 		{"test when i.scale < 0 and fraction doesn't exist", int64Amount{value: 100, scale: -1}, 0, 10, true},
 		{"test when i.value < 0 and fraction exists", int64Amount{value: -1932, scale: 2}, 4, -20, true},
@@ -156,6 +224,60 @@ func TestInt64AmountAsScaledInt64(t *testing.T) {
 			}
 			if ok != test.ok {
 				t.Errorf("%v: expected ok: %t, got ok: %t", test.name, test.ok, ok)
+			}
+		})
+	}
+}
+
+// TestScaleCanAlignInfScale locks the boundaries of the guard that gates the
+// decimal fallback in Sub: both operands must be representable, and their
+// alignment delta must fit int32. Directly pinning it here guards against the
+// range check being narrowed to one side, the bound flipping to a strict
+// comparison, or the delta regressing to int32 arithmetic.
+func TestScaleCanAlignInfScale(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		a    Scale
+		b    Scale
+		want bool
+	}{
+		{"same-scale", 0, 0, true},
+		{"positive-max-delta", Scale(math.MaxInt32), 0, true},
+		{"negative-max-delta", 0, Scale(math.MaxInt32), true},
+		{"positive-delta-overflow", Scale(math.MaxInt32), -1, false},
+		{"negative-delta-overflow", -1, Scale(math.MaxInt32), false},
+		{"receiver-min-int32", Scale(math.MinInt32), 0, false},
+		{"other-min-int32", 0, Scale(math.MinInt32), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.a.canAlignInfScale(tc.b); got != tc.want {
+				t.Fatalf("Scale(%d).canAlignInfScale(%d) = %t, want %t", tc.a, tc.b, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestScaleInfScale(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		scale  Scale
+		result inf.Scale
+	}{
+		{"positive scale flips sign", 3, -3},
+		{"negative scale flips sign", -3, 3},
+		{"zero", 0, 0},
+		{"MinInt32+1 flips sign", math.MinInt32 + 1, math.MaxInt32},
+		// Scale is an int32 and infScale returns inf.Scale(-s). Negating
+		// math.MinInt32 does not fit in an int32, so the sign is not flipped
+		// and the value stays math.MinInt32 - the same int-negation edge as
+		// -mostNegative for int64. This asserts that behavior of infScale
+		// directly (it is exercised on the inf.Dec path, e.g. ScaledValue on
+		// a Dec-backed Quantity; the int64 backend does not call it).
+		{"MinInt32 does not flip sign", math.MinInt32, math.MinInt32},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.scale.infScale(); got != test.result {
+				t.Errorf("%s: Scale(%d).infScale() = %d, want %d", test.name, test.scale, got, test.result)
 			}
 		})
 	}

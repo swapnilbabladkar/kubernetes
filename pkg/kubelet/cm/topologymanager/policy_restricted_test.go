@@ -20,6 +20,25 @@ import (
 	"testing"
 )
 
+func TestPolicyRestrictedName(t *testing.T) {
+	tcases := []struct {
+		name     string
+		expected string
+	}{
+		{
+			name:     "New Restricted Policy",
+			expected: "restricted",
+		},
+	}
+	numaInfo := commonNUMAInfoTwoNodes()
+	for _, tc := range tcases {
+		policy := &restrictedPolicy{bestEffortPolicy{numaInfo: numaInfo, opts: PolicyOptions{}}}
+		if policy.Name() != tc.expected {
+			t.Errorf("Expected Policy Name to be %s, got %s", tc.expected, policy.Name())
+		}
+	}
+}
+
 func TestPolicyRestrictedCanAdmitPodResult(t *testing.T) {
 	tcases := []struct {
 		name     string
@@ -39,31 +58,34 @@ func TestPolicyRestrictedCanAdmitPodResult(t *testing.T) {
 	}
 
 	for _, tc := range tcases {
-		numaNodes := []int{0, 1}
-		policy := NewRestrictedPolicy(numaNodes)
-		result := policy.(*restrictedPolicy).canAdmitPodResult(&tc.hint)
+		numaInfo := commonNUMAInfoTwoNodes()
+		policy := &restrictedPolicy{bestEffortPolicy{numaInfo: numaInfo}}
+		result := policy.canAdmitPodResult(&tc.hint)
 
-		if result.Admit != tc.expected {
-			t.Errorf("Expected Admit field in result to be %t, got %t", tc.expected, result.Admit)
-		}
-
-		if tc.expected == false {
-			if len(result.Reason) == 0 {
-				t.Errorf("Expected Reason field to be not empty")
-			}
-			if len(result.Message) == 0 {
-				t.Errorf("Expected Message field to be not empty")
-			}
+		if result != tc.expected {
+			t.Errorf("Expected result to be %t, got %t", tc.expected, result)
 		}
 	}
 }
 
-func TestRestrictedPolicyMerge(t *testing.T) {
-	numaNodes := []int{0, 1}
-	policy := NewRestrictedPolicy(numaNodes)
+func TestPolicyRestrictedMerge(t *testing.T) {
+	numaInfo := commonNUMAInfoFourNodes()
+	policy := &restrictedPolicy{bestEffortPolicy{numaInfo: numaInfo}}
 
-	tcases := commonPolicyMergeTestCases(numaNodes)
-	tcases = append(tcases, policy.(*restrictedPolicy).mergeTestCases(numaNodes)...)
+	tcases := commonPolicyMergeTestCases(numaInfo.Nodes)
+	tcases = append(tcases, policy.mergeTestCases(numaInfo.Nodes)...)
+	tcases = append(tcases, policy.mergeTestCasesNoPolicies(numaInfo.Nodes)...)
+
+	testPolicyMerge(policy, tcases, t)
+}
+
+func TestPolicyRestrictedMergeClosestNUMA(t *testing.T) {
+	numaInfo := commonNUMAInfoEightNodes()
+	policy := &restrictedPolicy{bestEffortPolicy{numaInfo: numaInfo, opts: PolicyOptions{PreferClosestNUMA: true}}}
+
+	tcases := commonPolicyMergeTestCases(numaInfo.Nodes)
+	tcases = append(tcases, policy.mergeTestCases(numaInfo.Nodes)...)
+	tcases = append(tcases, policy.mergeTestCasesClosestNUMA(numaInfo.Nodes)...)
 
 	testPolicyMerge(policy, tcases, t)
 }

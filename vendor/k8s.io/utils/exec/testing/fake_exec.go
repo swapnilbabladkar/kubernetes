@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sync"
 
 	"k8s.io/utils/exec"
 )
@@ -32,11 +33,12 @@ type FakeExec struct {
 	// ExactOrder enforces that commands are called in the order they are scripted,
 	// and with the exact same arguments
 	ExactOrder bool
-	// DisableScripts removes the requirement that a slice of FakeCommandAction be
-	// propulated before calling Command(). This makes the fakeexec (and subsequent
-	// calls to Run() or CombinedOutput() always return success and there is no
-	// ability to set their output.
+	// DisableScripts removes the requirement that CommandScripts be populated
+	// before calling Command(). This makes Command() and subsequent calls to
+	// Run() or CombinedOutput() always return success and empty output.
 	DisableScripts bool
+
+	mu sync.Mutex
 }
 
 var _ exec.Interface = &FakeExec{}
@@ -44,18 +46,15 @@ var _ exec.Interface = &FakeExec{}
 // FakeCommandAction is the function to be executed
 type FakeCommandAction func(cmd string, args ...string) exec.Cmd
 
-// Command is to track the commands that are executed
+// Command returns the next unexecuted command in CommandScripts.
+// This function is safe for concurrent access as long as the underlying
+// FakeExec struct is not modified during execution.
 func (fake *FakeExec) Command(cmd string, args ...string) exec.Cmd {
 	if fake.DisableScripts {
 		fakeCmd := &FakeCmd{DisableScripts: true}
 		return InitFakeCmd(fakeCmd, cmd, args...)
 	}
-	if fake.CommandCalls > len(fake.CommandScript)-1 {
-		panic(fmt.Sprintf("ran out of Command() actions. Could not handle command [%d]: %s args: %v", fake.CommandCalls, cmd, args))
-	}
-	i := fake.CommandCalls
-	fake.CommandCalls++
-	fakeCmd := fake.CommandScript[i](cmd, args...)
+	fakeCmd := fake.nextCommand(cmd, args)
 	if fake.ExactOrder {
 		argv := append([]string{cmd}, args...)
 		fc := fakeCmd.(*FakeCmd)
@@ -74,8 +73,20 @@ func (fake *FakeExec) Command(cmd string, args ...string) exec.Cmd {
 	return fakeCmd
 }
 
+func (fake *FakeExec) nextCommand(cmd string, args []string) exec.Cmd {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+
+	if fake.CommandCalls > len(fake.CommandScript)-1 {
+		panic(fmt.Sprintf("ran out of Command() actions. Could not handle command [%d]: %s args: %v", fake.CommandCalls, cmd, args))
+	}
+	i := fake.CommandCalls
+	fake.CommandCalls++
+	return fake.CommandScript[i](cmd, args...)
+}
+
 // CommandContext wraps arguments into exec.Cmd
-func (fake *FakeExec) CommandContext(ctx context.Context, cmd string, args ...string) exec.Cmd {
+func (fake *FakeExec) CommandContext(_ context.Context, cmd string, args ...string) exec.Cmd {
 	return fake.Command(cmd, args...)
 }
 
@@ -87,10 +98,13 @@ func (fake *FakeExec) LookPath(file string) (string, error) {
 // FakeCmd is a simple scripted Cmd type.
 type FakeCmd struct {
 	Argv                 []string
-	CombinedOutputScript []FakeCombinedOutputAction
+	CombinedOutputScript []FakeAction
 	CombinedOutputCalls  int
 	CombinedOutputLog    [][]string
-	RunScript            []FakeRunAction
+	OutputScript         []FakeAction
+	OutputCalls          int
+	OutputLog            [][]string
+	RunScript            []FakeAction
 	RunCalls             int
 	RunLog               [][]string
 	Dirs                 []string
@@ -120,11 +134,8 @@ type FakeStdIOPipeResponse struct {
 	Error      error
 }
 
-// FakeCombinedOutputAction is a function type
-type FakeCombinedOutputAction func() ([]byte, error)
-
-// FakeRunAction is a function type
-type FakeRunAction func() ([]byte, []byte, error)
+// FakeAction is a function type
+type FakeAction func() ([]byte, []byte, error)
 
 // SetDir sets the directory
 func (fake *FakeCmd) SetDir(dir string) {
@@ -213,12 +224,26 @@ func (fake *FakeCmd) CombinedOutput() ([]byte, error) {
 	i := fake.CombinedOutputCalls
 	fake.CombinedOutputLog = append(fake.CombinedOutputLog, append([]string{}, fake.Argv...))
 	fake.CombinedOutputCalls++
-	return fake.CombinedOutputScript[i]()
+	stdout, _, err := fake.CombinedOutputScript[i]()
+	return stdout, err
 }
 
 // Output is the response from the command
 func (fake *FakeCmd) Output() ([]byte, error) {
-	return nil, fmt.Errorf("unimplemented")
+	if fake.DisableScripts {
+		return []byte{}, nil
+	}
+	if fake.OutputCalls > len(fake.OutputScript)-1 {
+		panic("ran out of Output() actions")
+	}
+	if fake.OutputLog == nil {
+		fake.OutputLog = [][]string{}
+	}
+	i := fake.OutputCalls
+	fake.OutputLog = append(fake.OutputLog, append([]string{}, fake.Argv...))
+	fake.OutputCalls++
+	stdout, _, err := fake.OutputScript[i]()
+	return stdout, err
 }
 
 // Stop is to stop the process

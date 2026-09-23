@@ -31,8 +31,17 @@ func addDefaultingFuncs(scheme *runtime.Scheme) error {
 // SetDefaults_PriorityClass sets additional defaults compared to its counterpart
 // in extensions.
 func SetDefaults_PriorityClass(obj *v1beta1.PriorityClass) {
-	if utilfeature.DefaultFeatureGate.Enabled(features.NonPreemptingPriority) && obj.PreemptionPolicy == nil {
+	if obj.PreemptionPolicy == nil {
 		preemptLowerPriority := apiv1.PreemptLowerPriority
 		obj.PreemptionPolicy = &preemptLowerPriority
+	}
+}
+
+func SetDefaults_PodGroup(in *v1beta1.PodGroup) {
+	if utilfeature.DefaultFeatureGate.Enabled(features.PodGroupPreemptionPolicy) {
+		if in.Spec.PreemptionPolicy == nil {
+			preemptLowerPriority := v1beta1.PreemptLowerPriority
+			in.Spec.PreemptionPolicy = &preemptLowerPriority
+		}
 	}
 }

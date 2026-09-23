@@ -17,6 +17,8 @@ limitations under the License.
 package cache
 
 import (
+	"context"
+	"sync"
 	"time"
 
 	"k8s.io/component-base/metrics"
@@ -37,53 +39,63 @@ var (
 		&metrics.CounterOpts{
 			Namespace:      "authentication",
 			Subsystem:      "token_cache",
-			Name:           "request_count",
+			Name:           "request_total",
 			StabilityLevel: metrics.ALPHA,
 		},
 		[]string{"status"},
 	)
-	fetchCount = metrics.NewGaugeVec(
-		&metrics.GaugeOpts{
+	fetchCount = metrics.NewCounterVec(
+		&metrics.CounterOpts{
 			Namespace:      "authentication",
 			Subsystem:      "token_cache",
-			Name:           "fetch_count",
+			Name:           "fetch_total",
 			StabilityLevel: metrics.ALPHA,
 		},
 		[]string{"status"},
 	)
-	blockCount = metrics.NewGauge(
+	activeFetchCount = metrics.NewGaugeVec(
 		&metrics.GaugeOpts{
 			Namespace:      "authentication",
 			Subsystem:      "token_cache",
-			Name:           "block_count",
+			Name:           "active_fetch_count",
 			StabilityLevel: metrics.ALPHA,
 		},
+		[]string{"status"},
 	)
 )
 
-func init() {
-	legacyregistry.MustRegister(
-		requestLatency,
-		requestCount,
-		fetchCount,
-		blockCount,
-	)
+var registerMetricsOnce sync.Once
+
+// registerMetrics registers the token cache metrics with the legacy registry.
+// Do not use an init() function because feature gates (e.g., NativeHistograms)
+// must be parsed before the histogram metric is created and registered.
+func registerMetrics() {
+	registerMetricsOnce.Do(func() {
+		legacyregistry.MustRegister(
+			requestLatency,
+			requestCount,
+			fetchCount,
+			activeFetchCount,
+		)
+	})
 }
 
 const (
 	hitTag  = "hit"
 	missTag = "miss"
 
-	fetchActiveTag = "active"
 	fetchFailedTag = "error"
 	fetchOkTag     = "ok"
+
+	fetchInFlightTag = "in_flight"
+	fetchBlockedTag  = "blocked"
 )
 
 type statsCollector struct{}
 
 var stats = statsCollector{}
 
-func (statsCollector) authenticating() func(hit bool) {
+func (statsCollector) authenticating(ctx context.Context) func(hit bool) {
 	start := time.Now()
 	return func(hit bool) {
 		var tag string
@@ -95,18 +107,18 @@ func (statsCollector) authenticating() func(hit bool) {
 
 		latency := time.Since(start)
 
-		requestCount.WithLabelValues(tag).Inc()
-		requestLatency.WithLabelValues(tag).Observe(float64(latency.Milliseconds()) / 1000)
+		requestCount.WithContext(ctx).WithLabelValues(tag).Inc()
+		requestLatency.WithContext(ctx).WithLabelValues(tag).Observe(float64(latency.Milliseconds()) / 1000)
 	}
 }
 
-func (statsCollector) blocking() func() {
-	blockCount.Inc()
-	return blockCount.Dec
+func (statsCollector) blocking(ctx context.Context) func() {
+	activeFetchCount.WithContext(ctx).WithLabelValues(fetchBlockedTag).Inc()
+	return activeFetchCount.WithContext(ctx).WithLabelValues(fetchBlockedTag).Dec
 }
 
-func (statsCollector) fetching() func(ok bool) {
-	fetchCount.WithLabelValues(fetchActiveTag).Inc()
+func (statsCollector) fetching(ctx context.Context) func(ok bool) {
+	activeFetchCount.WithContext(ctx).WithLabelValues(fetchInFlightTag).Inc()
 	return func(ok bool) {
 		var tag string
 		if ok {
@@ -115,6 +127,8 @@ func (statsCollector) fetching() func(ok bool) {
 			tag = fetchFailedTag
 		}
 
-		fetchCount.WithLabelValues(tag).Dec()
+		fetchCount.WithContext(ctx).WithLabelValues(tag).Inc()
+
+		activeFetchCount.WithContext(ctx).WithLabelValues(fetchInFlightTag).Dec()
 	}
 }

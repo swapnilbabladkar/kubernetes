@@ -1,4 +1,4 @@
-// +build windows
+//go:build windows
 
 /*
 Copyright 2017 The Kubernetes Authors.
@@ -20,13 +20,15 @@ package hostutil
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
+	"syscall"
 
-	"k8s.io/klog"
-	"k8s.io/utils/mount"
+	"golang.org/x/sys/windows"
+	"k8s.io/klog/v2"
+	"k8s.io/mount-utils"
 	utilpath "k8s.io/utils/path"
 )
 
@@ -67,7 +69,7 @@ func getDeviceNameFromMount(mounter mount.Interface, mountPath, pluginMountDir s
 		}
 	}
 
-	return path.Base(mountPath), nil
+	return filepath.Base(mountPath), nil
 }
 
 // DeviceOpened determines if the device is in use elsewhere
@@ -86,9 +88,20 @@ func (hu *HostUtil) MakeRShared(path string) error {
 	return nil
 }
 
+func isSystemCannotAccessErr(err error) bool {
+	if fserr, ok := err.(*fs.PathError); ok {
+		errno, ok := fserr.Err.(syscall.Errno)
+		return ok && errno == windows.ERROR_CANT_ACCESS_FILE
+	}
+
+	return false
+}
+
 // GetFileType checks for sockets/block/character devices
 func (hu *(HostUtil)) GetFileType(pathname string) (FileType, error) {
-	return getFileType(pathname)
+	filetype, err := getFileType(pathname)
+
+	return filetype, err
 }
 
 // PathExists checks whether the path exists
@@ -121,4 +134,10 @@ func (hu *HostUtil) GetMode(pathname string) (os.FileMode, error) {
 		return 0, err
 	}
 	return info.Mode(), nil
+}
+
+// GetSELinuxMountContext returns value of -o context=XYZ mount option on
+// given mount point.
+func (hu *HostUtil) GetSELinuxMountContext(pathname string) (string, error) {
+	return "", nil
 }

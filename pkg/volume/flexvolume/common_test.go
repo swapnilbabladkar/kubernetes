@@ -18,6 +18,7 @@ package flexvolume
 
 import (
 	"encoding/json"
+	goruntime "runtime"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/kubernetes/pkg/volume"
@@ -39,9 +40,13 @@ func testPlugin(h *harness.Harness) (*flexVolumeAttachablePlugin, string) {
 	}, rootDir
 }
 
-func assertDriverCall(t *harness.Harness, output exectesting.FakeCombinedOutputAction, expectedCommand string, expectedArgs ...string) exectesting.FakeCommandAction {
+func assertDriverCall(t *harness.Harness, output exectesting.FakeAction, expectedCommand string, expectedArgs ...string) exectesting.FakeCommandAction {
 	return func(cmd string, args ...string) exec.Cmd {
-		if cmd != "/plugin/test" {
+		executable := "/plugin/test"
+		if goruntime.GOOS == "windows" {
+			executable = "c:\\plugin\\test"
+		}
+		if cmd != executable {
 			t.Errorf("Wrong executable called: got %v, expected %v", cmd, "/plugin/test")
 		}
 		if args[0] != expectedCommand {
@@ -53,7 +58,7 @@ func assertDriverCall(t *harness.Harness, output exectesting.FakeCombinedOutputA
 		}
 		return &exectesting.FakeCmd{
 			Argv:                 args,
-			CombinedOutputScript: []exectesting.FakeCombinedOutputAction{output},
+			CombinedOutputScript: []exectesting.FakeAction{output},
 		}
 	}
 }
@@ -64,21 +69,21 @@ func fakeRunner(fakeCommands ...exectesting.FakeCommandAction) exec.Interface {
 	}
 }
 
-func fakeResultOutput(result interface{}) exectesting.FakeCombinedOutputAction {
-	return func() ([]byte, error) {
+func fakeResultOutput(result interface{}) exectesting.FakeAction {
+	return func() ([]byte, []byte, error) {
 		bytes, err := json.Marshal(result)
 		if err != nil {
 			panic("Unable to marshal result: " + err.Error())
 		}
-		return bytes, nil
+		return bytes, nil, nil
 	}
 }
 
-func successOutput() exectesting.FakeCombinedOutputAction {
+func successOutput() exectesting.FakeAction {
 	return fakeResultOutput(&DriverStatus{StatusSuccess, "", "", "", true, nil, 0})
 }
 
-func notSupportedOutput() exectesting.FakeCombinedOutputAction {
+func notSupportedOutput() exectesting.FakeAction {
 	return fakeResultOutput(&DriverStatus{StatusNotSupported, "", "", "", false, nil, 0})
 }
 

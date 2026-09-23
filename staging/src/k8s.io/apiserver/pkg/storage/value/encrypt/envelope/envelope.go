@@ -18,6 +18,7 @@ limitations under the License.
 package envelope
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -26,13 +27,15 @@ import (
 	"time"
 
 	"k8s.io/apiserver/pkg/storage/value"
+	"k8s.io/apiserver/pkg/storage/value/encrypt/envelope/metrics"
+	"k8s.io/utils/lru"
 
-	lru "github.com/hashicorp/golang-lru"
 	"golang.org/x/crypto/cryptobyte"
 )
 
 func init() {
 	value.RegisterMetrics()
+	metrics.RegisterMetrics()
 }
 
 // Service allows encrypting and decrypting data using an external Key Management Service.
@@ -50,8 +53,9 @@ type envelopeTransformer struct {
 	transformers *lru.Cache
 
 	// baseTransformerFunc creates a new transformer for encrypting the data with the DEK.
-	baseTransformerFunc func(cipher.Block) value.Transformer
+	baseTransformerFunc func(cipher.Block) (value.Transformer, error)
 
+	cacheSize    int
 	cacheEnabled bool
 }
 
@@ -59,28 +63,27 @@ type envelopeTransformer struct {
 // It uses envelopeService to encrypt and decrypt DEKs. Respective DEKs (in encrypted form) are prepended to
 // the data items they encrypt. A cache (of size cacheSize) is maintained to store the most recently
 // used decrypted DEKs in memory.
-func NewEnvelopeTransformer(envelopeService Service, cacheSize int, baseTransformerFunc func(cipher.Block) value.Transformer) (value.Transformer, error) {
+func NewEnvelopeTransformer(envelopeService Service, cacheSize int, baseTransformerFunc func(cipher.Block) (value.Transformer, error)) value.Transformer {
 	var (
 		cache *lru.Cache
-		err   error
 	)
 
 	if cacheSize > 0 {
-		cache, err = lru.New(cacheSize)
-		if err != nil {
-			return nil, err
-		}
+		cache = lru.New(cacheSize)
 	}
 	return &envelopeTransformer{
 		envelopeService:     envelopeService,
 		transformers:        cache,
 		baseTransformerFunc: baseTransformerFunc,
 		cacheEnabled:        cacheSize > 0,
-	}, nil
+		cacheSize:           cacheSize,
+	}
 }
 
 // TransformFromStorage decrypts data encrypted by this transformer using envelope encryption.
-func (t *envelopeTransformer) TransformFromStorage(data []byte, context value.Context) ([]byte, bool, error) {
+func (t *envelopeTransformer) TransformFromStorage(ctx context.Context, data []byte, dataCtx value.Context) ([]byte, bool, error) {
+	metrics.RecordArrival(metrics.FromStorageLabel, time.Now())
+
 	// Read the 16 bit length-of-DEK encoded at the start of the encrypted DEK. 16 bits can
 	// represent a maximum key length of 65536 bytes. We are using a 256 bit key, whose
 	// length cannot fit in 8 bits (1 byte). Thus, we use 16 bits (2 bytes) to store the length.
@@ -112,11 +115,12 @@ func (t *envelopeTransformer) TransformFromStorage(data []byte, context value.Co
 		}
 	}
 
-	return transformer.TransformFromStorage(encData, context)
+	return transformer.TransformFromStorage(ctx, encData, dataCtx)
 }
 
 // TransformToStorage encrypts data to be written to disk using envelope encryption.
-func (t *envelopeTransformer) TransformToStorage(data []byte, context value.Context) ([]byte, error) {
+func (t *envelopeTransformer) TransformToStorage(ctx context.Context, data []byte, dataCtx value.Context) ([]byte, error) {
+	metrics.RecordArrival(metrics.ToStorageLabel, time.Now())
 	newKey, err := generateKey(32)
 	if err != nil {
 		return nil, err
@@ -135,7 +139,7 @@ func (t *envelopeTransformer) TransformToStorage(data []byte, context value.Cont
 		return nil, err
 	}
 
-	result, err := transformer.TransformToStorage(data, context)
+	result, err := transformer.TransformToStorage(ctx, data, dataCtx)
 	if err != nil {
 		return nil, err
 	}
@@ -157,11 +161,16 @@ func (t *envelopeTransformer) addTransformer(encKey []byte, key []byte) (value.T
 	if err != nil {
 		return nil, err
 	}
-	transformer := t.baseTransformerFunc(block)
+	transformer, err := t.baseTransformerFunc(block)
+	if err != nil {
+		return nil, err
+	}
+
 	// Use base64 of encKey as the key into the cache because hashicorp/golang-lru
 	// cannot hash []uint8.
 	if t.cacheEnabled {
 		t.transformers.Add(base64.StdEncoding.EncodeToString(encKey), transformer)
+		metrics.RecordDekCacheFillPercent(float64(t.transformers.Len()) / float64(t.cacheSize))
 	}
 	return transformer, nil
 }
